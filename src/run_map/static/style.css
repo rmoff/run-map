@@ -457,9 +457,38 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
 #filter-banner .icon-btn:hover { background: rgba(255,255,255,0.2); }
 
 /* ---- Mobile ---- */
-@media (max-width: 640px) {
-  #top-controls h1 { display: none; }
-  .floating-pill { font-size: .75rem; padding: 4px 10px; bottom: 8px; }
-  .match-popup .leaflet-popup-content { min-width: 200px; }
-  button, .icon-btn { min-height: 40px; }
+@media (max-width: 700px) {
+  #top-controls { padding: 4px 6px 4px 12px; }
+  #top-controls h1 { font-size: .85rem; }
+
+  .floating-pill { font-size: .75rem; padding: 5px 12px; }
+
+  /* Right rail → full-width column docked to the top. Preserves the
+     ordering (matches above embed) but adapts to portrait phones. */
+  #right-rail {
+    top: 12px;
+    right: 12px;
+    left: 12px;
+    bottom: auto;
+    width: auto;
+    max-width: none;
+    /* Below the right rail, leave room for the brand+settings bottom-left pill. */
+    max-height: calc(100vh - 80px);
+    gap: 8px;
+  }
+  #matches-panel { max-height: 38vh; }
+  #preview-panel { max-height: 50vh; flex: 0 1 auto; }
+
+  /* The bg-status pill and brand controls share the bottom — keep them
+     from overlapping by pushing the pill slightly up. */
+  #bg-status { bottom: 58px; }
+
+  /* Bigger touch targets */
+  button, .icon-btn { min-height: 42px; }
+  .seg-btn { min-height: 32px; padding: 4px 12px; }
+  input[type="range"] { height: 28px; }
+  .icon-btn { padding: 8px 12px; }
+
+  /* Settings drawer at near-full width */
+  #settings-drawer { width: 92vw; }
 }
