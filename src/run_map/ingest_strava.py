@@ -29,6 +29,12 @@ API = "https://www.strava.com/api/v3"
 RUN_TYPES = {"Run", "TrailRun"}
 
 
+def _activity_type(a: dict) -> str:
+    """Strava's legacy `type` collapses TrailRun into 'Run'. The newer
+    `sport_type` field preserves the distinction — prefer it when present."""
+    return a.get("sport_type") or a.get("type") or ""
+
+
 # ---- credentials / tokens -------------------------------------------------
 
 def load_config() -> dict:
@@ -203,7 +209,8 @@ def sync_with_tokens(
         with httpx.Client(headers=headers, timeout=30) as client:
             activities = _list_activities(client, after_epoch, on_wait=on_wait)
             for a in activities:
-                if a.get("type") not in RUN_TYPES:
+                a_type = _activity_type(a)
+                if a_type not in RUN_TYPES:
                     skipped += 1
                     continue
                 stream = _get_latlng_stream(client, a["id"], on_wait=on_wait)
@@ -222,7 +229,7 @@ def sync_with_tokens(
                     name=a.get("name") or "",
                     distance_m=float(a.get("distance") or 0.0),
                     moving_time_s=int(a.get("moving_time") or 0),
-                    type=a["type"],
+                    type=a_type,
                     strava_url=f"https://www.strava.com/activities/{a['id']}",
                     source="api",
                     track_wkt=wkt,

@@ -4,33 +4,52 @@ const map = L.map('map', {
   preferCanvas: true,           // canvas renderer = sharper many-track rendering
 }).setView([54, -2], 6);
 
-L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-  attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-  maxZoom: 19,
-}).addTo(map);
+const _osmAttr = '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>';
+const baseLayers = {
+  'Topo (OpenTopoMap)': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+    attribution: `${_osmAttr}, &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)`,
+    maxZoom: 17,
+  }),
+  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: _osmAttr,
+    maxZoom: 19,
+  }),
+  'Light (Carto)': L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: `${_osmAttr} &copy; <a href="https://carto.com/attributions">CARTO</a>`,
+    maxZoom: 19,
+  }),
+  'Cycle (CyclOSM)': L.tileLayer('https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png', {
+    attribution: `${_osmAttr}, &copy; <a href="https://www.cyclosm.org">CyclOSM</a>`,
+    maxZoom: 19,
+  }),
+  'Satellite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    attribution: 'Tiles &copy; Esri',
+    maxZoom: 19,
+  }),
+};
+let activeBaseLayer = baseLayers['Topo (OpenTopoMap)'];
+activeBaseLayer.setOpacity(0.5);
+activeBaseLayer.addTo(map);
+
+function setBaseLayer(name) {
+  const next = baseLayers[name];
+  if (!next || next === activeBaseLayer) return;
+  map.removeLayer(activeBaseLayer);
+  activeBaseLayer = next;
+  const opacity = parseFloat(document.getElementById('base-opacity').value) / 100;
+  activeBaseLayer.setOpacity(opacity);
+  activeBaseLayer.addTo(map);
+}
+
+function setBaseOpacity(pct) {
+  activeBaseLayer.setOpacity(pct / 100);
+}
 
 const drawnItems = new L.FeatureGroup().addTo(map);
 map.addControl(new L.Control.Draw({
   draw: { polyline: false, circle: false, marker: false, circlemarker: false },
-  edit: { featureGroup: drawnItems, edit: false },
+  edit: { featureGroup: drawnItems, edit: false, remove: false },
 }));
-
-// Locate-me button
-const LocateBtn = L.Control.extend({
-  options: { position: 'topleft' },
-  onAdd() {
-    const div = L.DomUtil.create('div', 'leaflet-bar leaflet-control');
-    const a = L.DomUtil.create('a', '', div);
-    a.href = '#'; a.title = 'My location'; a.textContent = '📍';
-    a.style.fontSize = '18px'; a.style.lineHeight = '26px'; a.style.textAlign = 'center';
-    L.DomEvent.on(a, 'click', e => {
-      L.DomEvent.preventDefault(e);
-      map.locate({ setView: true, maxZoom: 14 });
-    });
-    return div;
-  },
-});
-map.addControl(new LocateBtn());
 
 // View / reset menu — opens a small slide-out next to the button.
 const ViewMenuBtn = L.Control.extend({
@@ -69,9 +88,9 @@ const STYLE_CASING = { color: '#ffffff', weight: 4, opacity: 0.6 };
 const STYLE_BASE = { color: '#1a5a8a', weight: 2, opacity: 0.65 };
 const STYLE_MATCH_CASING = { color: '#ffffff', weight: 7, opacity: 0.9 };
 const STYLE_MATCH = { color: '#d62728', weight: 4.5, opacity: 0.95 };
-// Subtle yellow halo for the hovered row.
-const STYLE_HOVER_CASING = { color: '#ffd400', weight: 9, opacity: 0.55 };
-const STYLE_HOVER = { color: '#d62728', weight: 4.5, opacity: 1 };
+// Yellow halo for the emphasised row — chunkier and brighter than before.
+const STYLE_HOVER_CASING = { color: '#ffd400', weight: 11, opacity: 0.8 };
+const STYLE_HOVER = { color: '#d62728', weight: 5.5, opacity: 1 };
 // Dimmed look for the OTHER matches when one is hovered.
 const STYLE_MATCH_DIM_CASING = { color: '#ffffff', weight: 4, opacity: 0.35 };
 const STYLE_MATCH_DIM = { color: '#d62728', weight: 2.5, opacity: 0.35 };
@@ -85,7 +104,6 @@ let tracksByIndex = [];        // parallel to trackSamples — Leaflet layers
 let metaById = new Map();      // id -> { id, start_time, name, distance_m, strava_url }
 let autoMatchedId = null;      // the id we're currently auto-displaying, if any
 let autoMatchSuppressed = false; // set true when user dismisses a popup
-let _programmaticPopupClose = false;
 let trackSamples = null;       // [[lat, lng], ...] per track, precomputed
 let hexLayer = null;
 let hexBinsCache = new Map();  // resolution -> Map<cell, count>
@@ -146,8 +164,12 @@ function loadSavedState() {
 }
 let clickMarker = null;
 let clickRadiusCircle = null;
-let matchPopup = null;
+let matchesPanelOpen = false;  // is the top-right matches panel showing?
 let lastClickLatLng = null;
+let emphasisedId = null;       // id of the row currently visually emphasised
+let currentEmphasise = null;   // emphasise fn for the active matches set
+let matchesBounds = null;      // saved bbox of last multi-match for "back" fly
+
 let lastMatches = [];
 
 // ---- View presets + year filter -----------------------------------------
@@ -209,7 +231,6 @@ async function clearPolygonFilter() {
   polygonBounds = null;
   drawnItems.clearLayers();
   hidePolygonCloseBtn();
-  if (matchPopup) { const old = matchPopup; matchPopup = null; closePopupProgrammatically(old); }
   clearMatches();
   updateFilterBanner();
   saveState();
@@ -254,7 +275,6 @@ async function clearFilter() {
   drawnItems.clearLayers();
   autoMatchSuppressed = false;
   // Close any match popup since the highlighted set just changed.
-  if (matchPopup) { const old = matchPopup; matchPopup = null; closePopupProgrammatically(old); }
   clearMatches();
   // Only reload tracks if the year filter (the only real data filter) was
   // active. Otherwise the loaded set is unchanged — leaving the map view
@@ -283,6 +303,12 @@ function metresPerPixel(zoom, lat) {
 }
 
 function currentRadiusMetres() {
+  // Manual override from the settings slider (0 = auto).
+  const slider = document.getElementById('search-radius');
+  if (slider) {
+    const v = parseInt(slider.value, 10);
+    if (v > 0) return v;
+  }
   const c = map.getCenter();
   const m = metresPerPixel(map.getZoom(), c.lat) * CLICK_PIXEL_TOLERANCE;
   return Math.max(5, Math.min(2000, Math.round(m)));
@@ -293,7 +319,16 @@ function currentRadiusMetres() {
 // ---- Data load -----------------------------------------------------------
 
 async function loadTracks(opts = {}) {
-  showSpinner();
+  if (opts.append) {
+    // Background-load shows a small bottom-centre pill (not the blocking
+    // spinner), present for the whole fetch+parse+chunked-append duration.
+    setBgStatus('Loading more tracks…');
+    try { return await _loadTracksInner(opts); }
+    finally { setBgStatus(null); }
+  }
+
+  const label = opts.bbox ? 'Loading visible tracks…' : 'Loading tracks…';
+  showSpinner(label);
   try { return await _loadTracksInner(opts); }
   finally { hideSpinner(); }
 }
@@ -325,6 +360,15 @@ function _ingestFeatures(features) {
     for (let i = 0; i < c.length; i += step) samples.push([c[i][1], c[i][0]]);
     trackSamples.push(samples);
   }
+}
+
+const _yield = () => new Promise(r => setTimeout(r, 0));
+
+function setBgStatus(text) {
+  const el = document.getElementById('bg-status');
+  if (!text) { el.classList.add('hidden'); return; }
+  el.textContent = text;
+  el.classList.remove('hidden');
 }
 
 async function _loadTracksInner({ bbox = null, exclude_bbox = null, append = false } = {}) {
@@ -360,20 +404,44 @@ async function _loadTracksInner({ bbox = null, exclude_bbox = null, append = fal
     return false;
   }
 
-  _ingestFeatures(gj.features);
   hexBinsCache.clear();
   hexCellToTrackIdxs.clear();
 
-  if (!casingLayer) {
-    casingLayer = L.geoJSON(gj, _casingOpts).addTo(map);
-  } else {
-    casingLayer.addData(gj);
+  if (!append) {
+    // Foreground (interactive) path — do everything at once. The spinner is
+    // already showing; the user is waiting for this anyway.
+    updateSpinner(`Rendering ${gj.features.length} tracks…`);
+    _ingestFeatures(gj.features);
+    if (!casingLayer) {
+      casingLayer = L.geoJSON(gj, _casingOpts).addTo(map);
+    } else {
+      casingLayer.addData(gj);
+    }
+    if (!tracksLayer) {
+      tracksLayer = L.geoJSON(gj, _tracksOpts).addTo(map);
+    } else {
+      tracksLayer.addData(gj);
+    }
+    return true;
   }
-  if (!tracksLayer) {
-    tracksLayer = L.geoJSON(gj, _tracksOpts).addTo(map);
-  } else {
-    tracksLayer.addData(gj);
+
+  // Background (append) path — chunked + yielded so the main thread stays
+  // responsive for clicks. Each chunk yields back to the event loop.
+  const features = gj.features;
+  const CHUNK = 75;
+  const total = features.length;
+  for (let i = 0; i < total; i += CHUNK) {
+    const slice = features.slice(i, i + CHUNK);
+    _ingestFeatures(slice);
+    const sliceGj = { type: 'FeatureCollection', features: slice };
+    if (casingLayer) casingLayer.addData(sliceGj);
+    if (tracksLayer) tracksLayer.addData(sliceGj);
+    const done = Math.min(i + CHUNK, total);
+    setBgStatus(`Loading ${done.toLocaleString()}/${total.toLocaleString()} more tracks…`);
+    await _yield();
   }
+  setBgStatus(null);
+  if (lastMatches && lastMatches.length) applyMatchViewMode(lastMatches);
 
   return true;
 }
@@ -537,7 +605,7 @@ function applyZoomMode() {
     renderHexes();
     // Hex view is for density only — track-level interactions don't apply.
     clearClickGraphics();
-    if (matchPopup) { map.closePopup(matchPopup); matchPopup = null; }
+    hideMatchesPanel();
   }
 }
 
@@ -613,29 +681,24 @@ function bindMatchTooltips(matches) {
   }
 }
 
-function renderMatches(matches, atLatLng) {
-  if (matchPopup) {
-    const old = matchPopup;
-    matchPopup = null;
-    closePopupProgrammatically(old);
-  }
-  // Any prior preview belonged to the previous selection; drop it. The
-  // single-match branch below re-opens it for the new activity; in the
-  // multi-match branch it stays closed until the user clicks a title.
+function renderMatches(matches, atLatLng, { fit = true } = {}) {
+  hideMatchesPanel();
   hidePreview();
+  lastMatches = matches;
 
-  highlightFeatures(new Set(matches.map(m => m.id)));
+  applyMatchViewMode(matches);
   if (clickMarker) clickMarker.bringToFront();
 
-  // No matches: pop a brief "no runs here" and bail.
   if (!matches.length) {
-    matchPopup = L.popup({
-      className: 'match-popup', closeOnClick: true, autoClose: true, maxWidth: 280,
-    }).setLatLng(atLatLng).setContent('<p class="muted" style="margin:4px 0">No runs here at this radius.</p>').openOn(map);
+    matchesPanelOpen = true;
+    document.getElementById('matches-content').innerHTML =
+      '<p class="muted" style="margin:4px 0">No runs here at this radius.</p>';
+    document.getElementById('matches-panel').classList.remove('hidden');
     return;
   }
 
-  // Compute the zoom bbox regardless of branch.
+  // Compute combined bounds of all matches (used both to fit now AND to
+  // remember for the "back to overview" fly when the preview closes later).
   let b = null;
   for (const m of matches) {
     const layer = layersById.get(m.id);
@@ -643,70 +706,115 @@ function renderMatches(matches, atLatLng) {
     const lb = layer.getBounds();
     b = b ? b.extend(lb) : L.latLngBounds(lb.getSouthWest(), lb.getNorthEast());
   }
-  if (b) {
-    b.extend(atLatLng);
+  if (b && atLatLng) b.extend(atLatLng);
+  // Only remember for fly-back when there's actually more than one match —
+  // otherwise the "back" fly equals the "in" fly and is pointless.
+  matchesBounds = (matches.length > 1 && b) ? b : null;
+  if (fit && b) {
     map.flyToBounds(b, { padding: [10, 10], maxZoom: 18, duration: 0.6 });
   }
 
-  // Single match: skip the matches popup and the layer tooltip — they're
-  // redundant when there's only one option. Auto-open the rich preview.
+  // Single match: skip the table, the layer tooltip, and just auto-show the
+  // rich preview.
   if (matches.length === 1) {
     scheduleStravaPreview(matches[0].id, { delay: 0 });
     return;
   }
 
-  // Multiple matches: show the matches table and rely on layer tooltips so the
-  // user can identify which red line is which.
+  // Multiple matches: show the table in the top-right panel, with layer
+  // tooltips so each red line is identifiable from the map alone.
   bindMatchTooltips(matches);
   const html = `<table class="matches-table"><tbody>${matches.map(rowHtml).join('')}</tbody></table>`;
-  matchPopup = L.popup({
-    className: 'match-popup',
-    closeOnClick: false, autoClose: false, maxWidth: 360,
-  }).setLatLng(atLatLng).setContent(html).openOn(map);
+  const content = document.getElementById('matches-content');
+  content.innerHTML = html;
+  document.getElementById('matches-panel').classList.remove('hidden');
+  matchesPanelOpen = true;
 
-  const popupEl = matchPopup.getElement();
-  if (popupEl) {
-    popupEl.querySelectorAll('tr[data-id]').forEach(tr => {
-      const id = parseInt(tr.dataset.id, 10);
+  function emphasise(id, { force = false } = {}) {
+    if (!force && previewActivityId != null) return;
+    if (emphasisedId === id) return;
+    emphasisedId = id;
+    for (const m of matches) {
+      const ol = layersById.get(m.id);
+      const oc = casingsById.get(m.id);
+      if (!ol) continue;
+      if (id == null) {
+        // No emphasis: everyone back to the regular density baseline.
+        if (oc) oc.setStyle(STYLE_DENSITY_CASING);
+        ol.setStyle(STYLE_DENSITY);
+      } else if (m.id === id) {
+        if (oc) { oc.setStyle(STYLE_HOVER_CASING); oc.bringToFront(); }
+        ol.setStyle(STYLE_HOVER); ol.bringToFront();
+      } else {
+        if (oc) oc.setStyle(STYLE_DENSITY_CASING);
+        ol.setStyle(STYLE_DENSITY_FADED);
+      }
+    }
+    content.querySelectorAll('tr[data-id]').forEach(tr => {
+      tr.classList.toggle('emphasised', id != null && parseInt(tr.dataset.id, 10) === id);
+    });
+  }
+  // Expose so the row-title click path can call it.
+  currentEmphasise = emphasise;
+
+  content.querySelectorAll('tr[data-id]').forEach(tr => {
+    const id = parseInt(tr.dataset.id, 10);
+    tr.addEventListener('mouseenter', () => emphasise(id));
+  });
+  content.querySelectorAll('a.open-preview').forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      const id = parseInt(a.dataset.id, 10);
+      emphasise(id, { force: true });
+      scheduleStravaPreview(id, { delay: 0 });
       const layer = layersById.get(id);
-      const casing = casingsById.get(id);
-      if (!layer) return;
-      tr.addEventListener('mouseenter', () => {
-        // Dim every other matched track so the hovered one stands out.
-        for (const m of matches) {
-          if (m.id === id) continue;
-          const ol = layersById.get(m.id);
-          const oc = casingsById.get(m.id);
-          if (oc) oc.setStyle(STYLE_MATCH_DIM_CASING);
-          if (ol) ol.setStyle(STYLE_MATCH_DIM);
-        }
-        if (casing) { casing.setStyle(STYLE_HOVER_CASING); casing.bringToFront(); }
-        layer.setStyle(STYLE_HOVER); layer.bringToFront();
-      });
-      tr.addEventListener('mouseleave', () => {
-        // Restore every matched track to the regular match style.
-        for (const m of matches) {
-          const ol = layersById.get(m.id);
-          const oc = casingsById.get(m.id);
-          if (oc) oc.setStyle(STYLE_MATCH_CASING);
-          if (ol) ol.setStyle(STYLE_MATCH);
-        }
-      });
+      if (layer) {
+        map.flyToBounds(layer.getBounds(), { padding: [10, 10], maxZoom: 18, duration: 0.6 });
+      }
     });
-    // Title click → open the rich embed preview for that activity.
-    popupEl.querySelectorAll('a.open-preview').forEach(a => {
-      a.addEventListener('click', e => {
-        e.preventDefault();
-        const id = parseInt(a.dataset.id, 10);
-        scheduleStravaPreview(id, { delay: 0 });
-      });
-    });
+  });
+}
+
+function hideMatchesPanel() {
+  matchesPanelOpen = false;
+  emphasisedId = null;
+  document.getElementById('matches-panel').classList.add('hidden');
+  document.getElementById('matches-content').innerHTML = '';
+}
+
+// Translucent match lines — overlapping matches darken naturally via alpha
+// compositing without losing per-track precision. Casings hidden (their white
+// halo would block the overlap colour build-up). Single-match opacity is high
+// enough to remain clearly visible.
+const STYLE_DENSITY_CASING = { color: '#ffffff', weight: 0, opacity: 0 };
+const STYLE_DENSITY = { color: '#d62728', weight: 4.5, opacity: 0.75 };
+// When ONE match is emphasised, the others fade further to let the glow lead.
+const STYLE_DENSITY_FADED = { color: '#d62728', weight: 3, opacity: 0.18 };
+
+function applyMatchViewMode(matches) {
+  const ids = new Set(matches.map(m => m.id));
+  for (const [id, layer] of layersById) {
+    const casing = casingsById.get(id);
+    if (ids.has(id)) {
+      if (casing) casing.setStyle(STYLE_DENSITY_CASING);
+      layer.setStyle(STYLE_DENSITY);
+      layer.bringToFront();
+    } else {
+      if (casing) casing.setStyle(STYLE_CASING);
+      layer.setStyle(STYLE_BASE);
+    }
+  }
+  // Re-apply current emphasis (if any) on top of the freshly-styled set.
+  if (emphasisedId != null && ids.has(emphasisedId) && currentEmphasise) {
+    const e = emphasisedId; emphasisedId = null;  // force re-paint
+    currentEmphasise(e, { force: true });
   }
 }
 
 function clearMatches() {
-  if (matchPopup) { map.closePopup(matchPopup); matchPopup = null; }
+  hideMatchesPanel();
   lastMatches = [];
+  matchesBounds = null;
   for (const [, l] of layersById) l.unbindTooltip();
   highlightFeatures(new Set());
   hidePreview();
@@ -754,9 +862,13 @@ function escapeHTML(s) {
 // ---- Spinner ------------------------------------------------------------
 
 let _spinDepth = 0;
-function showSpinner() {
+function showSpinner(label = 'Loading…') {
   _spinDepth++;
+  document.getElementById('spinner-label').textContent = label;
   if (_spinDepth === 1) document.getElementById('spinner').classList.remove('hidden');
+}
+function updateSpinner(label) {
+  if (_spinDepth > 0) document.getElementById('spinner-label').textContent = label;
 }
 function hideSpinner() {
   _spinDepth = Math.max(0, _spinDepth - 1);
@@ -824,7 +936,16 @@ function hidePreview() {
   previewActivityId = null;
   document.getElementById('preview-panel').classList.add('hidden');
 }
-document.getElementById('preview-close').onclick = hidePreview;
+
+// User-clicked × on the preview: hide, release the emphasis pin, and fly
+// back to the matched-set view.
+document.getElementById('preview-close').onclick = () => {
+  hidePreview();
+  if (currentEmphasise) currentEmphasise(null, { force: true });
+  if (matchesBounds) {
+    map.flyToBounds(matchesBounds, { padding: [10, 10], maxZoom: 18, duration: 0.6 });
+  }
+};
 
 function fmtTime(sec) {
   if (!sec) return '?';
@@ -958,15 +1079,10 @@ function maybeAutoMatch() {
     clickMarker = L.circleMarker(anchor, {
       radius: 6, color: '#d62728', fillOpacity: 0.9, weight: 2,
     }).addTo(map);
-    renderMatches([meta], anchor);
+    renderMatches([meta], anchor, { fit: false });
   } else if (autoMatchedId != null) {
     autoMatchedId = null;
     clearClickGraphics();
-    if (matchPopup) {
-      const old = matchPopup;
-      matchPopup = null;
-      closePopupProgrammatically(old);
-    }
     clearMatches();
   }
 }
@@ -1010,11 +1126,10 @@ map.on('click', e => {
   // No flyTo here — renderMatches will fit-bounds to the matched tracks.
 });
 
-// Keep the search circle sized correctly if the user zooms while a click is active.
-map.on('zoomend', () => {
-  if (!clickMarker || !clickRadiusCircle) return;
-  clickRadiusCircle.setRadius(currentRadiusMetres());
-});
+// NOTE: don't resize clickRadiusCircle on zoom — it represents the actual
+// search radius (in metres) that produced the current matches. The L.circle
+// scales correctly visually as the user zooms; changing its `radius` would
+// imply a different search than what was performed.
 
 map.on(L.Draw.Event.CREATED, async e => {
   pushHistoryCheckpoint();
@@ -1022,7 +1137,7 @@ map.on(L.Draw.Event.CREATED, async e => {
   drawnItems.addLayer(e.layer);
   e.layer.setStyle({ color: '#d62728', weight: 2, fill: false });
   clearClickGraphics();
-  if (matchPopup) { const old = matchPopup; matchPopup = null; closePopupProgrammatically(old); }
+  hideMatchesPanel();
 
   const latlngs = e.layer.getLatLngs()[0];
   const pts = latlngs.map(p => `${p.lng} ${p.lat}`);
@@ -1187,27 +1302,51 @@ document.getElementById('open-settings').onclick = async () => { openSettings();
 document.getElementById('close-settings').onclick = closeSettings;
 document.getElementById('scrim').onclick = closeSettings;
 
-// Pressing the popup's × is handled by Leaflet; when popup closes, drop visuals too.
-map.on('popupclose', e => {
-  if (e.popup === matchPopup) {
-    matchPopup = null;
-    clearClickGraphics();
-    clearMatches();
-  }
-  // If the user closed the popup (× or click-away) we suppress further
-  // auto-match popups until they take a deliberate action (preset change,
-  // manual click, filter change). Programmatic closes don't trigger this.
-  if (!_programmaticPopupClose) {
-    autoMatchSuppressed = true;
-  }
+// User-initiated × on the matches panel: suppress further auto-matches.
+document.getElementById('matches-close').onclick = () => {
+  autoMatchSuppressed = true;
   autoMatchedId = null;
+  clearMatches();
+  clearClickGraphics();
+};
+
+// Leaving the entire matches panel clears the glow when nothing is pinned.
+// Attaches once globally and uses the closure exposed by renderMatches.
+document.getElementById('matches-panel').addEventListener('mouseleave', () => {
+  if (previewActivityId == null && currentEmphasise) currentEmphasise(null);
 });
 
-function closePopupProgrammatically(p) {
-  if (!p) return;
-  _programmaticPopupClose = true;
-  try { map.closePopup(p); } finally { _programmaticPopupClose = false; }
-}
+// Base map controls
+document.getElementById('base-layer').addEventListener('change', e => setBaseLayer(e.target.value));
+document.getElementById('base-opacity').addEventListener('input', e => {
+  document.getElementById('opacity-label').textContent = e.target.value;
+  setBaseOpacity(parseInt(e.target.value, 10));
+});
+
+document.getElementById('search-radius').addEventListener('input', e => {
+  const v = parseInt(e.target.value, 10);
+  document.getElementById('search-radius-label').textContent = v > 0 ? `${v} m` : 'auto';
+  if (clickRadiusCircle) clickRadiusCircle.setRadius(currentRadiusMetres());
+});
+
+document.getElementById('apply-radius').onclick = () => {
+  if (!clickMarker) return;
+  const p = clickMarker.getLatLng();
+  queryPoint(p.lat, p.lng);
+};
+
+// Match-view mode toggle (lines vs heatmap).
+document.querySelectorAll('.seg-btn[data-mode]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const mode = btn.dataset.mode;
+    if (matchViewMode === mode) return;
+    matchViewMode = mode;
+    document.querySelectorAll('.seg-btn[data-mode]').forEach(b => {
+      b.classList.toggle('active', b.dataset.mode === mode);
+    });
+    if (lastMatches && lastMatches.length) applyMatchViewMode(lastMatches);
+  });
+});
 
 // ---- Library stats -------------------------------------------------------
 
@@ -1337,7 +1476,6 @@ async function applyURLState({ animate } = { animate: false }) {
   updateFilterBanner();
 
   // Re-apply polygon highlight after tracks are loaded.
-  if (matchPopup) { const old = matchPopup; matchPopup = null; closePopupProgrammatically(old); }
   clearMatches();
   if (polygonFilter && polygonBounds) {
     const matches = await fetchPolygonMatches();

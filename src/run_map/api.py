@@ -25,31 +25,34 @@ app.add_middleware(GZipMiddleware, minimum_size=512)
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# One connection for the lifetime of the process. DuckDB allows multiple
-# in-process connections to the same file, so the ingest paths that open
-# their own connection work fine alongside this one.
-#
-# CRITICAL: DuckDB connections are NOT thread-safe. FastAPI runs sync routes
-# in a threadpool, so concurrent requests can hit the same connection from
-# different threads and corrupt the native heap (we've seen the process die
-# with "corrupted double-linked list"). Serialise every access with a lock.
-_conn = db.connect()
-_conn_lock = threading.Lock()
+_tls = threading.local()
+
+
+def _thread_conn():
+    """Each FastAPI threadpool worker holds its own DuckDB connection.
+
+    DuckDB allows many in-process connections to the same database file;
+    they coordinate internally. Sharing a single connection across threads
+    is unsafe (we have crashed with "corrupted double-linked list" doing
+    that), so per-thread is the right granularity. Long-running reads on
+    one worker no longer block parallel reads on another."""
+    c = getattr(_tls, "conn", None)
+    if c is None:
+        c = db.connect()
+        _tls.conn = c
+    return c
 
 
 def _db_fetchall(sql: str, params: list | None = None) -> list:
-    with _conn_lock:
-        return _conn.execute(sql, params or []).fetchall()
+    return _thread_conn().execute(sql, params or []).fetchall()
 
 
 def _db_fetchone(sql: str, params: list | None = None):
-    with _conn_lock:
-        return _conn.execute(sql, params or []).fetchone()
+    return _thread_conn().execute(sql, params or []).fetchone()
 
 
 def _db_exec(sql: str, params: list | None = None) -> None:
-    with _conn_lock:
-        _conn.execute(sql, params or [])
+    _thread_conn().execute(sql, params or [])
 
 
 # ---- HTML -----------------------------------------------------------------

@@ -17,13 +17,25 @@
     <button id="open-settings" class="icon-btn" aria-label="Settings" title="Settings">⚙</button>
   </div>
 
-  <!-- Loading spinner -->
-  <div id="spinner" class="hidden" aria-hidden="true"><div class="spin"></div></div>
+  <!-- Background-activity pill (bottom-centre) -->
+  <div id="bg-status" class="hidden floating-pill"></div>
 
-  <!-- Activity preview card -->
-  <div id="preview-panel" class="hidden">
-    <button id="preview-close" class="icon-btn" aria-label="Close">×</button>
-    <div id="preview-content"></div>
+  <!-- Loading spinner with status label -->
+  <div id="spinner" class="hidden" aria-hidden="true">
+    <div class="spin"></div>
+    <div id="spinner-label">Loading…</div>
+  </div>
+
+  <!-- Right rail: matches list above, embed preview below -->
+  <div id="right-rail">
+    <div id="matches-panel" class="hidden">
+      <button id="matches-close" class="icon-btn" aria-label="Close">×</button>
+      <div id="matches-content"></div>
+    </div>
+    <div id="preview-panel" class="hidden">
+      <button id="preview-close" class="icon-btn" aria-label="Close">×</button>
+      <div id="preview-content"></div>
+    </div>
   </div>
 
   <!-- Toast (info messages) -->
@@ -57,6 +69,24 @@
         <h3>Your library</h3>
         <div id="stats-content"><p class="muted">No data yet.</p></div>
       </section>
+
+      <h3>Map</h3>
+      <label for="base-layer">Base layer</label>
+      <select id="base-layer">
+        <option>Topo (OpenTopoMap)</option>
+        <option>OpenStreetMap</option>
+        <option>Light (Carto)</option>
+        <option>Cycle (CyclOSM)</option>
+        <option>Satellite</option>
+      </select>
+      <label for="base-opacity">Base opacity: <span id="opacity-label">50</span>%</label>
+      <input type="range" id="base-opacity" min="10" max="100" step="5" value="50">
+
+      <label for="search-radius">Search radius: <span id="search-radius-label">auto</span></label>
+      <div class="row">
+        <input type="range" id="search-radius" min="0" max="500" step="10" value="0" style="flex:1">
+        <button id="apply-radius" class="ghost">Apply</button>
+      </div>
 
       <label class="check-row">
         <input type="checkbox" id="lock-to-track" checked>
@@ -100,6 +130,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
   <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
