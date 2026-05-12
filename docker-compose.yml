@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    image: run-map
+    container_name: run-map
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/data
+      - ./src:/app/src
+    environment:
+      STRAVA_CLIENT_ID: ${STRAVA_CLIENT_ID:-}
+      STRAVA_CLIENT_SECRET: ${STRAVA_CLIENT_SECRET:-}
+      PYTHONPATH: /app/src
+    restart: unless-stopped

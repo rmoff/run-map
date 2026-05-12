@@ -5,9 +5,9 @@ description = "Personal run-history map — click a point to find when you ran t
 requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.1",
-    "streamlit>=1.36",
-    "streamlit-folium>=0.22",
-    "folium>=0.17",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
     "gpxpy>=1.6",
     "fitdecode>=0.10",
     "shapely>=2.0",

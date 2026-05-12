@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>run-map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="map"></div>
+
+  <!-- Top-right brand + settings button -->
+  <div id="top-controls">
+    <h1>run-map</h1>
+    <button id="open-settings" class="icon-btn" aria-label="Settings" title="Settings">⚙</button>
+  </div>
+
+  <!-- Loading spinner -->
+  <div id="spinner" class="hidden" aria-hidden="true"><div class="spin"></div></div>
+
+  <!-- Activity preview card -->
+  <div id="preview-panel" class="hidden">
+    <button id="preview-close" class="icon-btn" aria-label="Close">×</button>
+    <div id="preview-content"></div>
+  </div>
+
+  <!-- Toast (info messages) -->
+  <div id="toast" class="hidden">
+    <span id="toast-text"></span>
+    <button id="toast-close" class="icon-btn" aria-label="Dismiss">×</button>
+  </div>
+
+  <!-- Active filter banner (year-chart click, etc.) -->
+  <div id="filter-banner" class="floating-pill hidden">
+    Showing: <strong id="filter-label"></strong>
+    <button id="clear-filter" class="icon-btn" aria-label="Clear filter" title="Clear filter">×</button>
+  </div>
+
+  <!-- View menu (anchored under the map's view button) -->
+  <div id="view-menu" class="hidden" role="menu">
+    <button data-view="all">All data</button>
+    <button data-view="recent90">Last 90 days</button>
+    <button data-view="dense">Most traversed area</button>
+  </div>
+
+  <!-- Settings drawer -->
+  <aside id="settings-drawer" class="hidden" aria-hidden="true">
+    <header>
+      <h2>Settings</h2>
+      <button id="close-settings" class="icon-btn" aria-label="Close">×</button>
+    </header>
+
+    <div class="drawer-body">
+      <section id="library-stats" class="data-section" style="margin-top:0;padding-top:0;border-top:none">
+        <h3>Your library</h3>
+        <div id="stats-content"><p class="muted">No data yet.</p></div>
+      </section>
+
+      <label class="check-row">
+        <input type="checkbox" id="lock-to-track" checked>
+        Lock tap to nearest track
+      </label>
+
+      <section class="data-section">
+        <div class="section-header">
+          <h3>Strava API</h3>
+          <button id="test-creds" class="ghost" hidden>Test connection</button>
+        </div>
+        <div id="test-status" class="status"></div>
+
+        <details id="creds-details">
+          <summary>Credentials</summary>
+          <label for="cid">Client ID</label>
+          <input id="cid" autocomplete="off">
+          <label for="csec">Client Secret</label>
+          <input id="csec" type="password" autocomplete="off">
+          <div class="row">
+            <button id="save-creds">Save</button>
+            <button id="forget-tokens" class="ghost" hidden>Forget tokens</button>
+          </div>
+        </details>
+
+        <div id="strava-auth"></div>
+        <div id="strava-sync"></div>
+      </section>
+
+      <section class="data-section">
+        <h3>Import Strava export ZIP</h3>
+        <input type="file" id="zip-input" accept=".zip">
+        <div id="zip-status" class="status"></div>
+      </section>
+    </div>
+  </aside>
+
+  <!-- Scrim behind drawer -->
+  <div id="scrim" class="hidden"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

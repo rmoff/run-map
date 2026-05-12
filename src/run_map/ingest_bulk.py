@@ -60,15 +60,23 @@ def _parse_csv(export_dir: Path) -> pd.DataFrame:
     return df
 
 
-def ingest(export_dir: Path) -> tuple[int, int]:
+def ingest(export_dir: Path, *, progress_cb=None) -> tuple[int, int]:
+    """Ingest runs from a Strava export directory.
+
+    `progress_cb(done, total, label)` is called once per CSV row so the UI can
+    drive a progress bar. `done` is the number of rows processed so far.
+    """
     df = _parse_csv(export_dir)
     df = df[df["type"].isin(RUN_TYPES)].copy()
 
+    total = len(df)
     inserted = 0
     skipped = 0
     conn = db.connect()
     try:
-        for _, row in df.iterrows():
+        for done, (_, row) in enumerate(df.iterrows(), start=1):
+            if progress_cb is not None:
+                progress_cb(done, total, str(row.get("name") or row.get("filename") or ""))
             track_path = _find_track_file(export_dir, str(row.get("filename", "")))
             if not track_path:
                 skipped += 1

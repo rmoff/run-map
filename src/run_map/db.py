@@ -22,6 +22,13 @@ CREATE TABLE IF NOT EXISTS activities (
     source        VARCHAR,
     track         GEOMETRY
 );
+
+CREATE TABLE IF NOT EXISTS activity_details (
+    id           BIGINT PRIMARY KEY,
+    fetched_at   TIMESTAMP,
+    summary_json VARCHAR,
+    streams_json VARCHAR
+);
 """
 
 

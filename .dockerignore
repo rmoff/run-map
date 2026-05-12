@@ -1,0 +1,12 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.egg-info
+dist
+build
+data
+runs.duckdb*
+.strava_tokens.json
+.streamlit
+README.md.bak

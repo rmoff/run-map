@@ -9,6 +9,7 @@ build/
 runs.duckdb
 runs.duckdb.wal
 .strava_tokens.json
+data/
 
 .streamlit/secrets.toml
 .DS_Store
