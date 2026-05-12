@@ -626,7 +626,9 @@ function renderMatches(matches, atLatLng, { fit = true } = {}) {
   lastMatches = matches;
 
   applyMatchViewMode(matches);
-  if (clickMarker) clickMarker.bringToFront();
+  // clickMarker is an L.marker (divIcon pin) — its z-order is controlled by
+  // `zIndexOffset` set at creation; no bringToFront() needed (and L.marker
+  // doesn't expose it).
 
   if (!matches.length) {
     matchesPanelOpen = true;
