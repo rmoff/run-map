@@ -112,9 +112,9 @@ const HEX_ZOOM_THRESHOLD = 11; // <  hex view ; >= tracks view
 
 // Active filtering
 let currentPreset = 'recent90'; // 'all' | 'recent90' | 'dense' — default to recent
-let yearFilter = null;          // integer year, or null
 let polygonFilter = null;       // WKT POLYGON, or null
 let polygonBounds = null;       // L.latLngBounds of the drawn shape
+let prePinView = null;          // map view saved when a track is pinned
 
 // ---- Persistent view state (URL hash, so views are shareable) -----------
 
@@ -126,7 +126,6 @@ function _currentHash() {
   p.set('z', map.getZoom().toString());
   p.set('ll', `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`);
   if (currentPreset !== 'all') p.set('preset', currentPreset);
-  if (yearFilter != null) p.set('y', String(yearFilter));
   if (polygonFilter) p.set('poly', polygonFilter);
   const lock = document.getElementById('lock-to-track');
   if (lock && !lock.checked) p.set('lock', '0');
@@ -157,7 +156,6 @@ function loadSavedState() {
     zoom: p.get('z') ? parseInt(p.get('z'), 10) : null,
     center: (ll && ll.length === 2 && !ll.some(isNaN)) ? ll : null,
     preset: p.get('preset') || 'all',
-    yearFilter: p.get('y') ? parseInt(p.get('y'), 10) : null,
     polygonFilter: p.get('poly') || null,
     lockToTrack: p.get('lock') !== '0',
   };
@@ -175,40 +173,17 @@ let lastMatches = [];
 // ---- View presets + year filter -----------------------------------------
 
 function buildTracksQuery() {
-  // Presets ('recent90', 'dense') are zoom-only. Polygon is highlight-only
-  // (queried separately as a match). The only real data filter on the loaded
-  // set is the year (from chart click).
-  const params = new URLSearchParams();
-  if (yearFilter != null) {
-    params.set('from', `${yearFilter}-01-01`);
-    params.set('to',   `${yearFilter + 1}-01-01`);
-  }
-  const qs = params.toString();
-  return qs ? `?${qs}` : '';
+  // Presets and polygon are zoom/highlight only; nothing constrains the
+  // loaded set right now.
+  return '';
 }
 
 async function fetchPolygonMatches() {
   if (!polygonFilter) return [];
   const fd = new FormData();
   fd.append('wkt', polygonFilter);
-  if (yearFilter != null) {
-    fd.append('from', `${yearFilter}-01-01`);
-    fd.append('to',   `${yearFilter + 1}-01-01`);
-  }
   const r = await fetch('/match/polygon', { method: 'POST', body: fd });
   return r.ok ? r.json() : [];
-}
-
-function updateFilterBanner() {
-  // Polygon has its own × button on the map; only year-filter goes here.
-  const banner = document.getElementById('filter-banner');
-  const label = document.getElementById('filter-label');
-  if (yearFilter != null) {
-    label.textContent = `${yearFilter}`;
-    banner.classList.remove('hidden');
-  } else {
-    banner.classList.add('hidden');
-  }
 }
 
 let polygonCloseBtn = null;
@@ -232,20 +207,17 @@ async function clearPolygonFilter() {
   drawnItems.clearLayers();
   hidePolygonCloseBtn();
   clearMatches();
-  updateFilterBanner();
   saveState();
 }
 
 async function applyPreset(name) {
   pushHistoryCheckpoint();
   currentPreset = name;
-  yearFilter = null;
   document.getElementById('view-menu').classList.add('hidden');
   autoMatchSuppressed = false;
   await loadTracks();
   fitView();
   applyZoomMode();
-  updateFilterBanner();
   saveState();
   if (name === 'recent90') {
     showToast('Showing runs from the last 90 days. Use the ⟲ menu to change.');
@@ -254,42 +226,9 @@ async function applyPreset(name) {
   }
 }
 
-async function filterByYear(year) {
-  pushHistoryCheckpoint();
-  yearFilter = year;
-  autoMatchSuppressed = false;
-  await loadTracks();
-  fitView();
-  applyZoomMode();
-  updateFilterBanner();
-  saveState();
-}
-
-async function clearFilter() {
-  pushHistoryCheckpoint();
-  const hadYear = yearFilter != null;
-  yearFilter = null;
-  currentPreset = 'all';
-  polygonFilter = null;
-  polygonBounds = null;
-  drawnItems.clearLayers();
-  autoMatchSuppressed = false;
-  // Close any match popup since the highlighted set just changed.
-  clearMatches();
-  // Only reload tracks if the year filter (the only real data filter) was
-  // active. Otherwise the loaded set is unchanged — leaving the map view
-  // exactly where the user left it, per intent.
-  if (hadYear) await loadTracks();
-  applyZoomMode();
-  updateFilterBanner();
-  await loadStats();
-  saveState();
-}
-
 document.querySelectorAll('#view-menu button').forEach(btn => {
   btn.onclick = () => applyPreset(btn.dataset.view);
 });
-document.getElementById('clear-filter').onclick = clearFilter;
 
 // ---- Auto match radius (scales with zoom) --------------------------------
 
@@ -697,8 +636,9 @@ function renderMatches(matches, atLatLng, { fit = true } = {}) {
     return;
   }
 
-  // Compute combined bounds of all matches (used both to fit now AND to
-  // remember for the "back to overview" fly when the preview closes later).
+  // Combined bounds — remembered for the "fly back" when a pinned preview
+  // closes. Only the explicit "zoom to fit matches" setting causes a zoom on
+  // click; by default the view is left alone.
   let b = null;
   for (const m of matches) {
     const layer = layersById.get(m.id);
@@ -707,10 +647,9 @@ function renderMatches(matches, atLatLng, { fit = true } = {}) {
     b = b ? b.extend(lb) : L.latLngBounds(lb.getSouthWest(), lb.getNorthEast());
   }
   if (b && atLatLng) b.extend(atLatLng);
-  // Only remember for fly-back when there's actually more than one match —
-  // otherwise the "back" fly equals the "in" fly and is pointless.
   matchesBounds = (matches.length > 1 && b) ? b : null;
-  if (fit && b) {
+  const zoomToFit = document.getElementById('zoom-to-fit-matches')?.checked;
+  if (fit && b && zoomToFit) {
     map.flyToBounds(b, { padding: [10, 10], maxZoom: 18, duration: 0.6 });
   }
 
@@ -765,11 +704,18 @@ function renderMatches(matches, atLatLng, { fit = true } = {}) {
     a.addEventListener('click', e => {
       e.preventDefault();
       const id = parseInt(a.dataset.id, 10);
+      // Remember where we were so closing the preview can restore it.
+      prePinView = { center: map.getCenter(), zoom: map.getZoom() };
       emphasise(id, { force: true });
       scheduleStravaPreview(id, { delay: 0 });
       const layer = layersById.get(id);
       if (layer) {
-        map.flyToBounds(layer.getBounds(), { padding: [10, 10], maxZoom: 18, duration: 0.6 });
+        // Pin should frame the whole track AND the original search point,
+        // so the click marker + radius circle stay visible.
+        const b = L.latLngBounds(layer.getBounds().getSouthWest(), layer.getBounds().getNorthEast());
+        if (clickMarker) b.extend(clickMarker.getLatLng());
+        if (clickRadiusCircle) b.extend(clickRadiusCircle.getBounds());
+        map.flyToBounds(b, { padding: [20, 20], maxZoom: 17, duration: 0.6 });
       }
     });
   });
@@ -787,9 +733,9 @@ function hideMatchesPanel() {
 // halo would block the overlap colour build-up). Single-match opacity is high
 // enough to remain clearly visible.
 const STYLE_DENSITY_CASING = { color: '#ffffff', weight: 0, opacity: 0 };
-const STYLE_DENSITY = { color: '#d62728', weight: 4.5, opacity: 0.75 };
+const STYLE_DENSITY       = { color: '#d62728', weight: 4.5, opacity: 0.75 };
 // When ONE match is emphasised, the others fade further to let the glow lead.
-const STYLE_DENSITY_FADED = { color: '#d62728', weight: 3, opacity: 0.18 };
+const STYLE_DENSITY_FADED = { color: '#d62728', weight: 3,   opacity: 0.18 };
 
 function applyMatchViewMode(matches) {
   const ids = new Set(matches.map(m => m.id));
@@ -815,6 +761,7 @@ function clearMatches() {
   hideMatchesPanel();
   lastMatches = [];
   matchesBounds = null;
+  prePinView = null;
   for (const [, l] of layersById) l.unbindTooltip();
   highlightFeatures(new Set());
   hidePreview();
@@ -938,12 +885,13 @@ function hidePreview() {
 }
 
 // User-clicked × on the preview: hide, release the emphasis pin, and fly
-// back to the matched-set view.
+// back to wherever the user was before pinning.
 document.getElementById('preview-close').onclick = () => {
   hidePreview();
   if (currentEmphasise) currentEmphasise(null, { force: true });
-  if (matchesBounds) {
-    map.flyToBounds(matchesBounds, { padding: [10, 10], maxZoom: 18, duration: 0.6 });
+  if (prePinView) {
+    map.flyTo(prePinView.center, prePinView.zoom, { duration: 0.6 });
+    prePinView = null;
   }
 };
 
@@ -1118,10 +1066,19 @@ map.on('click', e => {
   clearClickGraphics();
   clickRadiusCircle = L.circle(target, {
     radius: r,
-    color: '#d62728', weight: 1, opacity: 0.5,
-    fillColor: '#d62728', fillOpacity: 0.08,
+    color: '#0891b2', weight: 1.5, opacity: 0.85,
+    fillColor: '#0891b2', fillOpacity: 0.08,
   }).addTo(map);
-  clickMarker = L.circleMarker(target, { radius: 5, color: '#d62728', fillOpacity: 0.9, weight: 2 }).addTo(map);
+  // Pin-shaped marker so the search point stays visible at any zoom level
+  // (a circleMarker can disappear inside the radius circle when zoomed out).
+  const pinHtml = `<svg viewBox="0 0 24 32" width="22" height="29" xmlns="http://www.w3.org/2000/svg">
+    <path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20c0-6.6-5.4-12-12-12z" fill="#0891b2" stroke="#fff" stroke-width="2"/>
+    <circle cx="12" cy="12" r="4" fill="#fff"/>
+  </svg>`;
+  clickMarker = L.marker(target, {
+    icon: L.divIcon({ html: pinHtml, className: 'click-pin', iconSize: [22, 29], iconAnchor: [11, 29] }),
+    interactive: false, keyboard: false, zIndexOffset: 800,
+  }).addTo(map);
   queryPoint(target.lat, target.lng);
   // No flyTo here — renderMatches will fit-bounds to the matched tracks.
 });
@@ -1146,7 +1103,6 @@ map.on(L.Draw.Event.CREATED, async e => {
   polygonBounds = e.layer.getBounds();
   autoMatchSuppressed = false;
   showPolygonCloseBtn();
-  updateFilterBanner();
 
   // Polygon highlights matches but doesn't hide other tracks — fetch the
   // intersecting set as a match, leave the loaded geojson untouched.
@@ -1335,6 +1291,7 @@ document.getElementById('apply-radius').onclick = () => {
   queryPoint(p.lat, p.lng);
 };
 
+
 // Match-view mode toggle (lines vs heatmap).
 document.querySelectorAll('.seg-btn[data-mode]').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -1366,10 +1323,7 @@ function renderYearChart(yearly) {
     const x = 2 + i * barW;
     const barH = (s.count / max) * h;
     const baseCls = s.count === 0 ? 'gap' : 'bar';
-    const activeCls = yearFilter === s.year ? ' active' : '';
-    svg += `<rect data-year="${s.year}" class="${baseCls}${activeCls}" x="${x + 1}" y="${h - barH}" width="${barW - 2}" height="${Math.max(barH, 1)}"><title>${s.year}: ${s.count}${s.count ? ' — click to filter' : ''}</title></rect>`;
-    // Invisible clickzone covering the full column makes thin/zero bars easier to hit.
-    svg += `<rect data-year="${s.year}" class="clickzone" x="${x}" y="0" width="${barW}" height="${h + pad}"><title>${s.year}: ${s.count}</title></rect>`;
+    svg += `<rect class="${baseCls}" x="${x + 1}" y="${h - barH}" width="${barW - 2}" height="${Math.max(barH, 1)}"><title>${s.year}: ${s.count}</title></rect>`;
     if (s.count) {
       svg += `<text x="${x + barW/2}" y="${h - barH - 2}" text-anchor="middle" font-size="9" fill="#444">${s.count}</text>`;
     }
@@ -1379,20 +1333,6 @@ function renderYearChart(yearly) {
   });
   svg += '</svg>';
   return svg;
-}
-
-function bindYearChartClicks() {
-  document.querySelectorAll('.year-chart [data-year]').forEach(el => {
-    el.addEventListener('click', () => {
-      const y = parseInt(el.dataset.year, 10);
-      if (yearFilter === y) {
-        clearFilter();
-      } else {
-        filterByYear(y);
-        // No need to re-load stats — they're library-wide.
-      }
-    });
-  });
 }
 
 async function loadStats() {
@@ -1409,7 +1349,6 @@ async function loadStats() {
     <p class="stats-summary"><strong>${s.count}</strong> runs · ${first} → ${last}</p>
     ${renderYearChart(s.yearly)}
   `;
-  bindYearChartClicks();
 }
 
 // Auto-open settings the first time, when there's nothing imported yet.
@@ -1424,11 +1363,10 @@ async function applyURLState({ animate } = { animate: false }) {
   const saved = loadSavedState();
   _restoringState = true;
 
-  const prevFilterKey = JSON.stringify([currentPreset, yearFilter, polygonFilter]);
+  const prevFilterKey = JSON.stringify([currentPreset, polygonFilter]);
 
   // Reset filters from URL
   currentPreset = saved?.preset || 'all';
-  yearFilter = (saved && typeof saved.yearFilter === 'number') ? saved.yearFilter : null;
   polygonFilter = saved?.polygonFilter || null;
   polygonBounds = null;
   drawnItems.clearLayers();
@@ -1450,7 +1388,7 @@ async function applyURLState({ animate } = { animate: false }) {
   const lock = document.getElementById('lock-to-track');
   if (lock) lock.checked = saved ? !!saved.lockToTrack : true;
 
-  const newFilterKey = JSON.stringify([currentPreset, yearFilter, polygonFilter]);
+  const newFilterKey = JSON.stringify([currentPreset, polygonFilter]);
   const filterChanged = newFilterKey !== prevFilterKey;
   const haveSavedView = saved && saved.center && Array.isArray(saved.center) && saved.zoom != null;
 
@@ -1473,7 +1411,6 @@ async function applyURLState({ animate } = { animate: false }) {
   }
 
   applyZoomMode();
-  updateFilterBanner();
 
   // Re-apply polygon highlight after tracks are loaded.
   clearMatches();

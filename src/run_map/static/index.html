@@ -44,12 +44,6 @@
     <button id="toast-close" class="icon-btn" aria-label="Dismiss">×</button>
   </div>
 
-  <!-- Active filter banner (year-chart click, etc.) -->
-  <div id="filter-banner" class="floating-pill hidden">
-    Showing: <strong id="filter-label"></strong>
-    <button id="clear-filter" class="icon-btn" aria-label="Clear filter" title="Clear filter">×</button>
-  </div>
-
   <!-- View menu (anchored under the map's view button) -->
   <div id="view-menu" class="hidden" role="menu">
     <button data-view="all">All data</button>
@@ -88,9 +82,15 @@
         <button id="apply-radius" class="ghost">Apply</button>
       </div>
 
+
       <label class="check-row">
         <input type="checkbox" id="lock-to-track" checked>
         Lock tap to nearest track
+      </label>
+
+      <label class="check-row">
+        <input type="checkbox" id="zoom-to-fit-matches">
+        Zoom to fit matched tracks
       </label>
 
       <section class="data-section">

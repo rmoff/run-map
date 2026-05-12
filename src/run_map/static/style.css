@@ -225,6 +225,12 @@ details { margin: 4px 0 8px; }
 summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
 
 /* ---- Radius drag handle on map ---- */
+.click-pin {
+  background: transparent;
+  border: none;
+  filter: drop-shadow(0 2px 3px rgba(0,0,0,0.25));
+}
+
 .polygon-close-btn {
   display: flex;
   align-items: center;
