@@ -175,7 +175,9 @@ def stats() -> dict:
     )
     yearly = _db_fetchall(
         """
-        SELECT EXTRACT(year FROM start_time)::INT, count(*)
+        SELECT EXTRACT(year FROM start_time)::INT AS year,
+               SUM(CASE WHEN type = 'TrailRun' THEN 1 ELSE 0 END) AS trail,
+               SUM(CASE WHEN type != 'TrailRun' THEN 1 ELSE 0 END) AS road
         FROM activities
         WHERE start_time IS NOT NULL
         GROUP BY 1 ORDER BY 1
@@ -185,7 +187,10 @@ def stats() -> dict:
         "count": int(row[0] or 0),
         "earliest": row[1].isoformat() if row[1] else None,
         "latest": row[2].isoformat() if row[2] else None,
-        "yearly": [{"year": int(y), "count": int(n)} for y, n in yearly],
+        "yearly": [
+            {"year": int(y), "trail": int(t or 0), "road": int(r or 0)}
+            for y, t, r in yearly
+        ],
     }
 
 
@@ -229,14 +234,69 @@ def match_polygon(
 
 # ---- Bulk ingest ----------------------------------------------------------
 
+_import_state: dict = {
+    "running": False,
+    "phase": "idle",         # idle | uploading | unzipping | importing | done | error
+    "processed": 0,
+    "total": 0,
+    "inserted": 0,
+    "unreadable": 0,
+    "message": "",
+    "error": None,
+}
+_import_lock = threading.Lock()
+
+
+def _run_import_thread(root: Path) -> None:
+    def on_progress(done: int, total: int, label: str) -> None:
+        with _import_lock:
+            _import_state["phase"] = "importing"
+            _import_state["processed"] = done
+            _import_state["total"] = total
+            _import_state["message"] = f"Importing {done}/{total} · {label[:50]}"
+    try:
+        inserted, unreadable = ingest_bulk.ingest(root, progress_cb=on_progress)
+        _invalidate_tracks_cache()
+        with _import_lock:
+            _import_state.update({
+                "running": False, "phase": "done",
+                "inserted": inserted, "unreadable": unreadable,
+                "message": (
+                    f"Imported {inserted} runs"
+                    + (f" · {unreadable} files unreadable" if unreadable else "")
+                ),
+                "error": None,
+            })
+    except Exception as e:
+        with _import_lock:
+            _import_state.update({
+                "running": False, "phase": "error",
+                "error": str(e), "message": f"Import failed: {e}",
+            })
+
+
 @app.post("/import/zip")
 async def import_zip(file: UploadFile = File(...)) -> dict:
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-        zip_path = tmp_path / "export.zip"
+    """Accept upload, extract, kick off ingest in a background thread.
+    Returns immediately; poll `/import/zip/status` for progress."""
+    with _import_lock:
+        if _import_state["running"]:
+            return {"status": "already_running"}
+        _import_state.update({
+            "running": True, "phase": "uploading",
+            "processed": 0, "total": 0, "inserted": 0, "unreadable": 0,
+            "message": "Receiving upload…", "error": None,
+        })
+
+    tmp_path = Path(tempfile.mkdtemp(prefix="run-map-import-"))
+    zip_path = tmp_path / "export.zip"
+    try:
         with zip_path.open("wb") as f:
             while chunk := await file.read(1024 * 1024):
                 f.write(chunk)
+        with _import_lock:
+            _import_state["phase"] = "unzipping"
+            _import_state["message"] = "Unzipping export…"
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(tmp_path)
         root = tmp_path
@@ -244,9 +304,19 @@ async def import_zip(file: UploadFile = File(...)) -> dict:
             nested = [p for p in tmp_path.iterdir() if p.is_dir() and (p / "activities.csv").exists()]
             if nested:
                 root = nested[0]
-        inserted, skipped = await asyncio.to_thread(ingest_bulk.ingest, root)
-    _invalidate_tracks_cache()
-    return {"inserted": inserted, "skipped": skipped}
+    except Exception as e:
+        with _import_lock:
+            _import_state.update({"running": False, "phase": "error", "error": str(e)})
+        raise HTTPException(500, str(e))
+
+    threading.Thread(target=_run_import_thread, args=(root,), daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/import/zip/status")
+def import_zip_status() -> dict:
+    with _import_lock:
+        return dict(_import_state)
 
 
 # ---- Strava ---------------------------------------------------------------
@@ -314,22 +384,91 @@ def strava_test() -> dict:
     return {"firstname": a.get("firstname", ""), "lastname": a.get("lastname", "")}
 
 
+# In-process sync state, polled by the UI via /strava/sync/status.
+_sync_state: dict = {
+    "running": False,
+    "phase": "idle",       # idle | listing | processing | rate_limited | done | error
+    "processed": 0,
+    "total": 0,
+    "inserted": 0,
+    "skipped": 0,
+    "message": "",
+    "error": None,
+}
+_sync_lock = threading.Lock()
+
+
+def _run_sync_thread(tokens: dict, since: int | None) -> None:
+    def on_wait(seconds: int) -> None:
+        mins = max(1, seconds // 60)
+        with _sync_lock:
+            _sync_state["phase"] = "rate_limited"
+            _sync_state["message"] = f"Strava rate-limited — waiting ~{mins} min for next window"
+
+    def on_progress(state: dict) -> None:
+        with _sync_lock:
+            _sync_state.update(state)
+            _sync_state["running"] = True
+
+    try:
+        inserted, skipped = ingest_strava.sync_with_tokens(
+            tokens, since_epoch=since, on_wait=on_wait, on_progress=on_progress
+        )
+        _invalidate_tracks_cache()
+        with _sync_lock:
+            _sync_state.update({
+                "running": False, "phase": "done",
+                "inserted": inserted, "skipped": skipped,
+                "message": (
+                    f"Synced {inserted} runs"
+                    + (f" · {skipped} other-sport / no-GPS ignored" if skipped else "")
+                ),
+                "error": None,
+            })
+    except ingest_strava.DailyRateLimit as e:
+        with _sync_lock:
+            _sync_state.update({
+                "running": False, "phase": "error",
+                "error": str(e), "message": str(e),
+            })
+    except Exception as e:
+        with _sync_lock:
+            _sync_state.update({
+                "running": False, "phase": "error",
+                "error": str(e), "message": f"Sync failed: {e}",
+            })
+
+
 @app.post("/strava/sync")
-async def strava_sync(range: str = Form("Since last sync")) -> dict:
+def strava_sync(range: str = Form("Since last sync")) -> dict:
+    """Kick off a sync in a background thread. Returns immediately; poll
+    `/strava/sync/status` for progress."""
+    with _sync_lock:
+        if _sync_state["running"]:
+            return {"status": "already_running"}
+        _sync_state.update({
+            "running": True, "phase": "listing",
+            "processed": 0, "total": 0, "inserted": 0, "skipped": 0,
+            "message": "Starting…", "error": None,
+        })
+
     cfg = ingest_strava.load_config()
     tokens = ingest_strava.load_tokens()
     if not tokens or not cfg.get("client_id"):
+        with _sync_lock:
+            _sync_state.update({"running": False, "phase": "error", "error": "Not authorised yet"})
         raise HTTPException(400, "Not authorised yet")
     tokens = ingest_strava.refresh_tokens(cfg["client_id"], cfg["client_secret"], tokens)
     since = _range_to_epoch(range)
-    try:
-        inserted, skipped = await asyncio.to_thread(
-            ingest_strava.sync_with_tokens, tokens, since_epoch=since
-        )
-    except ingest_strava.DailyRateLimit as e:
-        raise HTTPException(429, str(e))
-    _invalidate_tracks_cache()
-    return {"inserted": inserted, "skipped": skipped}
+
+    threading.Thread(target=_run_sync_thread, args=(tokens, since), daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/strava/sync/status")
+def strava_sync_status() -> dict:
+    with _sync_lock:
+        return dict(_sync_state)
 
 
 @app.get("/activity/{activity_id}")
@@ -381,6 +520,50 @@ def activity_details(activity_id: int) -> dict:
     )
 
     return {"summary": summary, "streams": streams}
+
+
+@app.post("/strava/fix-types")
+def strava_fix_types() -> dict:
+    """Backfill the `type` column from Strava's `sport_type`. Cheap — only
+    paginated summary calls (no streams), so a full backfill takes ~9 API
+    calls for ~1700 activities."""
+    import httpx as _hx
+    cfg = ingest_strava.load_config()
+    tokens = ingest_strava.load_tokens()
+    if not tokens or not cfg.get("client_id"):
+        raise HTTPException(400, "Not authorised yet")
+    tokens = ingest_strava.refresh_tokens(cfg["client_id"], cfg["client_secret"], tokens)
+
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    updated = 0
+    examined = 0
+    with _hx.Client(headers=headers, timeout=30) as client:
+        page = 1
+        while True:
+            r = client.get(
+                f"{ingest_strava.API}/athlete/activities",
+                params={"per_page": 200, "page": page, "after": 0},
+            )
+            if r.status_code == 429:
+                raise HTTPException(429, "Strava rate limit hit")
+            r.raise_for_status()
+            chunk = r.json()
+            if not chunk:
+                break
+            for a in chunk:
+                examined += 1
+                t = ingest_strava._activity_type(a)
+                if t not in ingest_strava.RUN_TYPES:
+                    continue
+                row = _db_fetchone("SELECT type FROM activities WHERE id = ?", [int(a["id"])])
+                if row is None:
+                    continue
+                if row[0] != t:
+                    _db_exec("UPDATE activities SET type = ? WHERE id = ?", [t, int(a["id"])])
+                    updated += 1
+            page += 1
+    _invalidate_tracks_cache()
+    return {"examined": examined, "updated": updated}
 
 
 @app.delete("/strava/tokens")

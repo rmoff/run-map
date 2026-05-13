@@ -20,18 +20,10 @@ body {
   z-index: 500;
   display: flex;
   align-items: center;
-  gap: 8px;
   background: rgba(255,255,255,0.94);
   backdrop-filter: blur(8px);
-  border-radius: 22px;
-  padding: 6px 8px 6px 14px;
+  border-radius: 50%;
   box-shadow: 0 2px 12px rgba(0,0,0,0.12);
-}
-#top-controls h1 {
-  font-size: 1rem;
-  margin: 0;
-  font-weight: 700;
-  letter-spacing: -0.01em;
 }
 
 .icon-btn {
@@ -128,7 +120,9 @@ body {
 .matches-table tr.emphasised td.name a { color: #d62728; }
 .matches-table td a { color: inherit; text-decoration: none; }
 .matches-table td.type { width: 22px; padding-right: 2px; text-align: center; }
-.ti { font-size: .95rem; line-height: 1; display: inline-block; }
+.ti { display: inline-block; vertical-align: middle; }
+.ti.road  { color: #1f77b4; }
+.ti.trail { color: #16a34a; }
 .matches-table td.date { font-variant-numeric: tabular-nums; color: #555; white-space: nowrap; }
 .matches-table td.dist { text-align: right; font-variant-numeric: tabular-nums; color: #555; white-space: nowrap; }
 .matches-table td.name { color: #888; font-size: .8rem; }
@@ -256,12 +250,21 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
   margin: 8px 0;
   display: block;
 }
-.year-chart .bar { fill: #1a5a8a; cursor: pointer; }
-.year-chart .bar:hover { fill: #d62728; }
-.year-chart .bar.active { fill: #d62728; }
 .year-chart .gap { fill: #eee; }
-.year-chart .clickzone { fill: transparent; cursor: pointer; }
 .stats-summary { font-size: .85rem; color: #444; margin: 6px 0; }
+.chart-legend {
+  display: flex;
+  gap: 14px;
+  font-size: .75rem;
+  color: #555;
+  margin: 2px 0 8px;
+}
+.chart-legend .swatch {
+  display: inline-block;
+  width: 10px; height: 10px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
 
 /* ---- Map-anchored view menu ---- */
 #view-menu {
@@ -458,9 +461,6 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
 
 /* ---- Mobile ---- */
 @media (max-width: 700px) {
-  #top-controls { padding: 4px 6px 4px 12px; }
-  #top-controls h1 { font-size: .85rem; }
-
   .floating-pill { font-size: .75rem; padding: 5px 12px; }
 
   /* Right rail → full-width column docked to the top. Preserves the

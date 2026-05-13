@@ -127,8 +127,18 @@ function _currentHash() {
   p.set('ll', `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`);
   if (currentPreset !== 'all') p.set('preset', currentPreset);
   if (polygonFilter) p.set('poly', polygonFilter);
+  // Settings persistence — only non-default values go on the wire to keep
+  // shared URLs short.
   const lock = document.getElementById('lock-to-track');
   if (lock && !lock.checked) p.set('lock', '0');
+  const zoomFit = document.getElementById('zoom-to-fit-matches');
+  if (zoomFit && zoomFit.checked) p.set('zfit', '1');
+  const base = document.getElementById('base-layer');
+  if (base && base.value !== 'Topo (OpenTopoMap)') p.set('base', base.value);
+  const opacity = document.getElementById('base-opacity');
+  if (opacity && opacity.value !== '50') p.set('op', opacity.value);
+  const sr = document.getElementById('search-radius');
+  if (sr && sr.value !== '0') p.set('sr', sr.value);
   return '#' + p.toString();
 }
 
@@ -158,6 +168,10 @@ function loadSavedState() {
     preset: p.get('preset') || 'all',
     polygonFilter: p.get('poly') || null,
     lockToTrack: p.get('lock') !== '0',
+    zoomToFit: p.get('zfit') === '1',
+    baseLayer: p.get('base') || 'Topo (OpenTopoMap)',
+    baseOpacity: p.get('op') ? parseInt(p.get('op'), 10) : 50,
+    searchRadius: p.get('sr') ? parseInt(p.get('sr'), 10) : 0,
   };
 }
 let clickMarker = null;
@@ -585,9 +599,13 @@ function highlightFeatures(idSet) {
   }
 }
 
+// Strava's own activity icons (Run / TrailRun), inlined.
+const ICON_ROAD = `<svg class="ti road" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><title>Road run</title><path fill="currentColor" d="M8.688 0C8.025 0 7.38.215 6.85.613l-3.32 2.49-2.845.948A1 1 0 000 5c0 1.579.197 2.772.567 3.734.376.978.907 1.654 1.476 2.223.305.305.6.567.886.82.785.697 1.5 1.33 2.159 2.634 1.032 2.57 2.37 4.748 4.446 6.27C11.629 22.218 14.356 23 18 23c2.128 0 3.587-.553 4.549-1.411a4.378 4.378 0 001.408-2.628c.152-.987-.389-1.787-.967-2.25l-3.892-3.114a1 1 0 01-.329-.477l-3.094-9.726A2 2 0 0013.769 2h-1.436a2 2 0 00-1.2.4l-.57.428-.516-1.803A1.413 1.413 0 008.688 0zM8.05 2.213c.069-.051.143-.094.221-.127l1.168 4.086L12.333 4h1.436l.954 3H12v2h3.36l.318 1H13v2h3.314l.55 1.726a3 3 0 00.984 1.433l3.106 2.485c-.77.19-1.778.356-2.954.356-1.97 0-3.178-.431-4.046-1.087-.895-.677-1.546-1.675-2.251-3.056-.224-.437-.45-.907-.688-1.403C9.875 10.08 8.444 7.1 5.531 4.102zM3.743 5.14c2.902 2.858 4.254 5.664 5.441 8.126.25.517.49 1.018.738 1.502.732 1.432 1.55 2.777 2.827 3.74C14.053 19.495 15.72 20 18 20c1.492 0 2.754-.23 3.684-.479a2.285 2.285 0 01-.467.575c-.5.446-1.435.904-3.217.904-3.356 0-5.629-.718-7.284-1.931-1.663-1.22-2.823-3.028-3.788-5.44a1.012 1.012 0 00-.034-.076c-.853-1.708-1.947-2.673-2.79-3.417a14.61 14.61 0 01-.647-.593c-.431-.431-.775-.88-1.024-1.527-.21-.545-.367-1.271-.417-2.3z"/></svg>`;
+const ICON_TRAIL = `<svg class="ti trail" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><title>Trail run</title><path fill="currentColor" d="M8.688 0C8.025 0 7.38.215 6.85.613l-3.32 2.49-2.845.948A1 1 0 000 5c0 1.579.197 2.772.567 3.734.376.978.907 1.654 1.476 2.223.305.305.6.567.886.82.785.697 1.5 1.33 2.159 2.634 1.032 2.57 2.37 4.748 4.446 6.27.15.11.303.217.46.319h-2.58l-2.707-2.707a1 1 0 00-1.414 0L3 18.586l-1.5-1.5L.086 18.5l2.207 2.207a1 1 0 001.414 0L4 20.414l2.293 2.293A1 1 0 007 23h11c2.128 0 3.587-.553 4.549-1.411a4.378 4.378 0 001.408-2.628c.152-.987-.389-1.787-.967-2.25l-3.892-3.114a1 1 0 01-.329-.477l-3.094-9.726A2 2 0 0013.769 2h-1.436a2 2 0 00-1.2.4l-.57.428-.516-1.803A1.413 1.413 0 008.688 0zM18 21c-3.356 0-5.629-.718-7.284-1.931-1.663-1.22-2.823-3.028-3.788-5.44a1.012 1.012 0 00-.034-.076c-.853-1.708-1.947-2.673-2.79-3.417-.24-.212-.46-.405-.647-.593-.431-.431-.775-.88-1.024-1.527-.21-.545-.367-1.271-.417-2.3l1.323-.442L5 7.351v1.706l.333.299c1.11.992 2.452 2.512 3.933 4.839 1.356 2.132 3.156 3.553 5.26 4.685l.222.12h7.156c-.105.36-.307.758-.687 1.096-.5.446-1.435.904-3.217.904zM5.175 4.368L8.05 2.213c.069-.051.143-.094.221-.127l1.168 4.086L12.333 4h1.436l.954 3H10v1.934l3.11 3.391-.724 1.014L13.454 15h4.21c.06.055.12.108.184.16L20.15 17h-4.893c-1.793-.996-3.223-2.182-4.303-3.88C9.526 10.88 8.188 9.295 7 8.172V6.65zM15.36 9l.039.122-1.1 1.54L12.774 9zm.796 2.502L16.632 13h-1.546z"/></svg>`;
+
 function typeIcon(type) {
-  if (type === 'TrailRun') return '<span class="ti trail" title="Trail run">⛰️</span>';
-  if (type === 'Run')      return '<span class="ti road"  title="Road run">🛣️</span>';
+  if (type === 'TrailRun') return ICON_TRAIL;
+  if (type === 'Run')      return ICON_ROAD;
   return '';
 }
 
@@ -982,10 +1000,23 @@ map.on(L.Draw.Event.DRAWSTART, () => { isDrawing = true; });
 // the map; delay clearing the flag so map.click sees us as "still drawing".
 map.on(L.Draw.Event.DRAWSTOP, () => { setTimeout(() => { isDrawing = false; }, 150); });
 
-// Persist view across reloads (writes to the URL hash so views are shareable).
+// Persist view + settings across reloads (URL hash).
 map.on('moveend', saveState);
+
+// Any setting change writes to the URL.
+const _persistedSettingIds = new Set([
+  'lock-to-track', 'zoom-to-fit-matches',
+  'base-layer', 'base-opacity', 'search-radius',
+]);
 document.addEventListener('change', e => {
-  if (e.target && e.target.id === 'lock-to-track') saveState();
+  if (e.target && _persistedSettingIds.has(e.target.id)) saveState();
+});
+// Sliders also fire `input` continuously — debounce-save them.
+let _settingSaveTimer = null;
+document.addEventListener('input', e => {
+  if (!e.target || !_persistedSettingIds.has(e.target.id)) return;
+  clearTimeout(_settingSaveTimer);
+  _settingSaveTimer = setTimeout(saveState, 300);
 });
 
 // ---- Auto-match: when only one track is in view, treat as a match -------
@@ -1126,24 +1157,61 @@ document.getElementById('zip-input').addEventListener('change', async e => {
   if (!file) return;
   const status = document.getElementById('zip-status');
   status.className = 'status';
-  status.textContent = `Uploading ${(file.size / 1e6).toFixed(1)} MB and parsing — this may take a while…`;
+  status.textContent = `Uploading ${(file.size / 1e6).toFixed(1)} MB…`;
+  showSpinner('Uploading export…');
+
   const fd = new FormData();
   fd.append('file', file);
+  let r;
   try {
-    const r = await fetch('/import/zip', { method: 'POST', body: fd });
+    r = await fetch('/import/zip', { method: 'POST', body: fd });
     if (!r.ok) throw new Error(await r.text());
-    const j = await r.json();
-    status.className = 'status ok';
-    status.textContent = `Imported ${j.inserted} runs (skipped ${j.skipped}).`;
-    await loadTracks();
-    fitView();
-    applyZoomMode();
-    await loadStats();
   } catch (err) {
+    hideSpinner();
     status.className = 'status error';
-    status.textContent = `Failed: ${err.message || err}`;
+    status.textContent = `Upload failed: ${err.message || err}`;
+    return;
   }
+  // Server now processing in the background — poll for status.
+  pollImportStatus(status);
 });
+
+async function pollImportStatus(statusEl) {
+  let timer;
+  const tick = async () => {
+    let j;
+    try { j = await (await fetch('/import/zip/status')).json(); }
+    catch { return; }
+
+    if (j.phase === 'uploading' || j.phase === 'unzipping') {
+      statusEl.className = 'status';
+      statusEl.textContent = j.message || 'Preparing import…';
+      updateSpinner(j.message || 'Preparing import…');
+    } else if (j.phase === 'importing') {
+      const pct = j.total ? Math.round((j.processed / j.total) * 100) : 0;
+      const text = `${j.processed}/${j.total} parsed (${pct}%) · ${j.inserted} runs imported`;
+      statusEl.className = 'status';
+      statusEl.textContent = text;
+      updateSpinner(text);
+    } else if (j.phase === 'done') {
+      clearInterval(timer);
+      hideSpinner();
+      statusEl.className = 'status ok';
+      statusEl.textContent = j.message;
+      await loadTracks();
+      fitView();
+      applyZoomMode();
+      await loadStats();
+    } else if (j.phase === 'error') {
+      clearInterval(timer);
+      hideSpinner();
+      statusEl.className = 'status error';
+      statusEl.textContent = j.message || j.error || 'Import failed';
+    }
+  };
+  await tick();
+  timer = setInterval(tick, 1000);
+}
 
 document.getElementById('save-creds').onclick = async () => {
   const fd = new FormData();
@@ -1227,23 +1295,51 @@ async function refreshStravaUI() {
   `;
   document.getElementById('do-sync').onclick = async () => {
     const s = document.getElementById('sync-status');
+    s.className = 'status'; s.textContent = 'Starting…';
     const fd = new FormData();
     fd.append('range', document.getElementById('sync-range').value);
-    s.className = 'status'; s.textContent = 'Syncing — this may take a while if rate-limited…';
     const r = await fetch('/strava/sync', { method: 'POST', body: fd });
-    if (r.ok) {
-      const j = await r.json();
-      s.className = 'status ok';
-      s.textContent = `Synced ${j.inserted} runs (skipped ${j.skipped}).`;
+    if (!r.ok) {
+      s.className = 'status error';
+      s.textContent = `Sync failed: ${await r.text()}`;
+      return;
+    }
+    pollSyncStatus(s);
+  };
+};
+
+async function pollSyncStatus(statusEl) {
+  let pollTimer;
+  const tick = async () => {
+    let j;
+    try { j = await (await fetch('/strava/sync/status')).json(); }
+    catch { /* transient — retry */ return; }
+
+    if (j.phase === 'rate_limited') {
+      statusEl.className = 'status'; statusEl.textContent = j.message;
+    } else if (j.phase === 'listing') {
+      statusEl.className = 'status'; statusEl.textContent = j.message || 'Listing activities…';
+    } else if (j.phase === 'processing') {
+      const pct = j.total ? Math.round((j.processed / j.total) * 100) : 0;
+      statusEl.className = 'status';
+      statusEl.textContent = `${j.processed}/${j.total} processed (${pct}%) · ${j.inserted} runs imported so far`;
+    } else if (j.phase === 'done') {
+      clearInterval(pollTimer);
+      statusEl.className = 'status ok';
+      statusEl.textContent = j.message;
       await loadTracks();
       fitView();
       applyZoomMode();
       await loadStats();
-    } else {
-      const t = await r.text();
-      s.className = 'status error'; s.textContent = `Sync failed: ${t}`;
+    } else if (j.phase === 'error') {
+      clearInterval(pollTimer);
+      statusEl.className = 'status error';
+      statusEl.textContent = j.message || j.error || 'Sync failed';
     }
   };
+  // Run once immediately, then every second.
+  await tick();
+  pollTimer = setInterval(tick, 1000);
 }
 
 // ---- Settings drawer + matches panel chrome ------------------------------
@@ -1311,29 +1407,41 @@ document.querySelectorAll('.seg-btn[data-mode]').forEach(btn => {
 
 function renderYearChart(yearly) {
   if (!yearly.length) return '';
-  // Fill in missing years so gaps are visually obvious.
   const minY = yearly[0].year, maxY = yearly[yearly.length - 1].year;
-  const byYear = new Map(yearly.map(y => [y.year, y.count]));
+  const byYear = new Map(yearly.map(y => [y.year, y]));
   const series = [];
-  for (let y = minY; y <= maxY; y++) series.push({ year: y, count: byYear.get(y) || 0 });
+  for (let y = minY; y <= maxY; y++) {
+    series.push(byYear.get(y) || { year: y, road: 0, trail: 0 });
+  }
 
   const w = 300, h = 80, pad = 18;
   const barW = (w - 4) / series.length;
-  const max = Math.max(...series.map(s => s.count), 1);
+  const max = Math.max(...series.map(s => (s.road || 0) + (s.trail || 0)), 1);
+  const ROAD = '#1f77b4', TRAIL = '#16a34a';
   let svg = `<svg viewBox="0 0 ${w} ${h + pad}" class="year-chart" preserveAspectRatio="xMidYMid meet">`;
   series.forEach((s, i) => {
     const x = 2 + i * barW;
-    const barH = (s.count / max) * h;
-    const baseCls = s.count === 0 ? 'gap' : 'bar';
-    svg += `<rect class="${baseCls}" x="${x + 1}" y="${h - barH}" width="${barW - 2}" height="${Math.max(barH, 1)}"><title>${s.year}: ${s.count}</title></rect>`;
-    if (s.count) {
-      svg += `<text x="${x + barW/2}" y="${h - barH - 2}" text-anchor="middle" font-size="9" fill="#444">${s.count}</text>`;
+    const total = (s.road || 0) + (s.trail || 0);
+    const roadH = (s.road / max) * h;
+    const trailH = (s.trail / max) * h;
+    const fullH = roadH + trailH;
+    if (total === 0) {
+      svg += `<rect class="gap" x="${x + 1}" y="${h - 1}" width="${barW - 2}" height="1"><title>${s.year}: 0</title></rect>`;
+    } else {
+      // road sits at the base, trail stacks on top
+      svg += `<rect x="${x + 1}" y="${h - roadH}" width="${barW - 2}" height="${roadH}" fill="${ROAD}"><title>${s.year}: ${s.road} road</title></rect>`;
+      svg += `<rect x="${x + 1}" y="${h - fullH}" width="${barW - 2}" height="${trailH}" fill="${TRAIL}"><title>${s.year}: ${s.trail} trail</title></rect>`;
+      svg += `<text x="${x + barW/2}" y="${h - fullH - 2}" text-anchor="middle" font-size="9" fill="#444">${total}</text>`;
     }
     if (series.length <= 12 || i % 2 === 0) {
       svg += `<text x="${x + barW/2}" y="${h + 12}" text-anchor="middle" font-size="9" fill="#777">${s.year}</text>`;
     }
   });
   svg += '</svg>';
+  svg += `<div class="chart-legend">
+    <span><span class="swatch" style="background:${ROAD}"></span>Road</span>
+    <span><span class="swatch" style="background:${TRAIL}"></span>Trail</span>
+  </div>`;
   return svg;
 }
 
@@ -1389,6 +1497,28 @@ async function applyURLState({ animate } = { animate: false }) {
   }
   const lock = document.getElementById('lock-to-track');
   if (lock) lock.checked = saved ? !!saved.lockToTrack : true;
+  const zoomFit = document.getElementById('zoom-to-fit-matches');
+  if (zoomFit) zoomFit.checked = !!saved?.zoomToFit;
+
+  // Base layer + opacity
+  const baseSel = document.getElementById('base-layer');
+  const baseName = saved?.baseLayer || 'Topo (OpenTopoMap)';
+  if (baseSel && baseSel.value !== baseName) baseSel.value = baseName;
+  setBaseLayer(baseName);
+  const opacitySlider = document.getElementById('base-opacity');
+  const opacityVal = saved?.baseOpacity ?? 50;
+  if (opacitySlider) {
+    opacitySlider.value = String(opacityVal);
+    document.getElementById('opacity-label').textContent = String(opacityVal);
+    setBaseOpacity(opacityVal);
+  }
+  // Search radius
+  const srSlider = document.getElementById('search-radius');
+  const srVal = saved?.searchRadius ?? 0;
+  if (srSlider) {
+    srSlider.value = String(srVal);
+    document.getElementById('search-radius-label').textContent = srVal > 0 ? `${srVal} m` : 'auto';
+  }
 
   const newFilterKey = JSON.stringify([currentPreset, polygonFilter]);
   const filterChanged = newFilterKey !== prevFilterKey;

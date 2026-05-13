@@ -187,13 +187,18 @@ def athlete(tokens: dict) -> dict:
 
 
 def sync_with_tokens(
-    tokens: dict, *, since_epoch: int | None = None, on_wait=None
+    tokens: dict,
+    *,
+    since_epoch: int | None = None,
+    on_wait=None,
+    on_progress=None,
 ) -> tuple[int, int]:
     """Sync activities.
 
-    `since_epoch` overrides the default behaviour (which resumes from the
-    latest stored start_time, or 0 if the DB is empty). `on_wait(seconds)` is
-    called when sleeping for a rate-limit window so the UI can surface it.
+    `since_epoch` overrides the default (resume from `max(start_time)`).
+    `on_wait(seconds)` fires when sleeping for a rate-limit window.
+    `on_progress(state)` fires after each activity processed, with a dict:
+        { phase, fetched, total, inserted, skipped, message }
     """
     headers = {"Authorization": f"Bearer {tokens['access_token']}"}
     conn = db.connect()
@@ -206,20 +211,35 @@ def sync_with_tokens(
 
         inserted = 0
         skipped = 0
+
+        def _report(phase: str, processed: int, total: int, message: str = "") -> None:
+            if on_progress:
+                on_progress({
+                    "phase": phase, "processed": processed, "total": total,
+                    "inserted": inserted, "skipped": skipped, "message": message,
+                })
+
+        _report("listing", 0, 0, "Listing activities…")
         with httpx.Client(headers=headers, timeout=30) as client:
             activities = _list_activities(client, after_epoch, on_wait=on_wait)
-            for a in activities:
+            total = len(activities)
+            _report("processing", 0, total, f"Found {total} activities to consider")
+
+            for i, a in enumerate(activities, start=1):
                 a_type = _activity_type(a)
                 if a_type not in RUN_TYPES:
                     skipped += 1
+                    _report("processing", i, total)
                     continue
                 stream = _get_latlng_stream(client, a["id"], on_wait=on_wait)
                 if not stream:
                     skipped += 1
+                    _report("processing", i, total)
                     continue
                 wkt = points_to_linestring_wkt(stream)
                 if not wkt:
                     skipped += 1
+                    _report("processing", i, total)
                     continue
                 start_time = datetime.fromisoformat(a["start_date"].replace("Z", "+00:00")).replace(tzinfo=None)
                 db.upsert_activity(
@@ -235,6 +255,7 @@ def sync_with_tokens(
                     track_wkt=wkt,
                 )
                 inserted += 1
+                _report("processing", i, total)
     finally:
         conn.close()
     return inserted, skipped
