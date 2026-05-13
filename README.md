@@ -47,10 +47,13 @@ Only `Run` and `TrailRun` activity types are imported. The bulk export CSV doesn
 
 - **Click a point on the map** → matched runs appear in a panel top-right. Hover a row to highlight its track; click the run name to pin its Strava preview (bottom-right).
 - **Draw a polygon / rectangle** (toolbar top-left) → all tracks intersecting it become matches.
-- **Zoom out** → individual tracks give way to an H3 hex heatmap. Click a hex to zoom into its tracks.
-- **⚙ bottom-left** → settings: base layer (OpenTopoMap, OSM, satellite, …), opacity, search radius, view options, Strava sync, ZIP import.
+- **Zoom out** → individual tracks give way to an H3 hex heatmap coloured by run count per cell. Click a hex to zoom into its tracks.
+- **Zoom in** → a single blue layer shows every road / trail you've ever run (deduped), giving you bearings and something to click on. The precise individual tracks only appear once you've matched some.
+- **Filter chips** (top-centre) → narrow the working set by year, run type, or distance. The map, heatmap and click matches all respect the filter. URL-shareable.
+- **🗺 top-left** → display popover: base layer (OpenTopoMap, OSM, satellite, …), base opacity, heatmap overlay. The heatmap auto-hides while a match is active, then comes back when you clear it.
 - **⟲ top-left** → view presets (All / Last 90 days / Most traversed area).
-- **URL hash** carries the full view + settings, so reloading or sharing the URL restores the same state.
+- **⚙ bottom-left** → settings drawer: click behaviour (search radius, lock-tap-to-track, zoom-to-fit), Strava API config + sync, ZIP import, library stats.
+- **URL hash** carries the full view + filters + display settings, so reloading or sharing the URL restores the same state.
 
 ## Stack
 

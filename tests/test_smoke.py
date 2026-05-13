@@ -18,13 +18,15 @@ from playwright.sync_api import Page, expect
 
 
 def _seed_map(page: Page, app_url: str):
-    with page.expect_response(
-        lambda r: "/tracks.geojson" in r.url and r.status == 200, timeout=15_000
-    ):
-        page.goto(app_url, wait_until="domcontentloaded")
-    # Give Leaflet a tick to instantiate the GeoJSON layers + canvas.
-    page.wait_for_selector(".leaflet-overlay-pane canvas", timeout=10_000)
-    page.wait_for_timeout(300)
+    # Boot loads /index.json + /aggregate.geojson. Once the aggregate layer
+    # is on the map, applyURLState has finished — that's the readiness signal
+    # we wait on.
+    page.goto(app_url, wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => window.__rm && window.__rm.aggregateOn && window.__rm.aggregateOn()",
+        timeout=20_000,
+    )
+    page.wait_for_timeout(200)
 
 
 def _click_centre_of_map(page: Page):
@@ -59,6 +61,121 @@ def test_desktop_settings_drawer(page: Page, app_url):
     page.click("#open-settings")
     expect(page.locator("#settings-drawer")).not_to_have_class("hidden")
     page.click("#close-settings")
+
+
+def test_aggregate_layer_present(page: Page, app_url):
+    """At track-view zoom the aggregate layer must be on the map."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+    assert page.evaluate("() => window.__rm.aggregateOn()"), \
+        "aggregate layer not added to map"
+
+
+def test_match_geometry_renders_red_polyline(page: Page, app_url):
+    """Clicking should populate matches AND draw the precise red track(s).
+
+    Before this work, matches were drawn by recolouring pre-loaded tracks;
+    now they're built from inline geometry returned by /match. The
+    `matchLayersById` JS map is the source of truth.
+    """
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    with page.expect_response(lambda r: "/match" in r.url and r.status == 200, timeout=10_000):
+        bb = page.locator("#map").bounding_box()
+        page.mouse.click(bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2)
+
+    page.wait_for_selector(
+        "#matches-panel:not(.hidden), #preview-panel:not(.hidden)", timeout=8_000
+    )
+    match_count = page.evaluate("() => window.__rm.matchCount()")
+    assert match_count > 0, "no match polylines were built from /match geometry"
+
+
+def test_heatmap_toggle(page: Page, app_url):
+    """The heatmap overlay lives in the 🗺 display popover and toggles the
+    heatmap layer on the map."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    # Open the display popover via its title-tagged Leaflet control.
+    page.locator('a[title="Display"]').click()
+    page.locator("#display-menu").wait_for(state="visible", timeout=3_000)
+    page.check("#heatmap-toggle")
+
+    page.wait_for_function("() => window.__rm.heatmapOn()", timeout=10_000)
+    assert page.evaluate("() => window.__rm.heatmapOn()"), \
+        "heatmap layer not added to map when toggled on"
+
+    page.uncheck("#heatmap-toggle")
+    assert not page.evaluate("() => window.__rm.heatmapOn()"), \
+        "heatmap layer not removed from map when toggled off"
+
+
+def test_heatmap_hides_on_match(page: Page, app_url):
+    """Toggling the heatmap on then clicking should hide the heatmap while
+    the match is active and restore it when the match is cleared."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    # Turn the heatmap on.
+    page.locator('a[title="Display"]').click()
+    page.locator("#display-menu").wait_for(state="visible", timeout=3_000)
+    page.check("#heatmap-toggle")
+    page.wait_for_function("() => window.__rm.heatmapOn()", timeout=10_000)
+
+    # Click the centre of the map — should produce matches.
+    bb = page.locator("#map").bounding_box()
+    page.mouse.click(bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2)
+    page.wait_for_selector(
+        "#matches-panel:not(.hidden), #preview-panel:not(.hidden)", timeout=8_000
+    )
+
+    # Heatmap must be off-map while a match is showing.
+    assert not page.evaluate("() => window.__rm.heatmapOn()"), \
+        "heatmap should be hidden while a match is active"
+
+
+def test_filter_chip_flow(page: Page, app_url):
+    """Adding a year filter via the chip bar should refetch data and the
+    chip should appear; clearing the chip should reset."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    # Open the add-filter menu and pick the first available year.
+    page.click("#add-filter")
+    page.locator("#filter-menu").wait_for(state="visible", timeout=3_000)
+    # Select the first year option.
+    page.evaluate("""
+        () => {
+            const sel = document.getElementById('filter-year');
+            if (sel.options.length) sel.options[0].selected = true;
+        }
+    """)
+    page.click("#filter-apply")
+
+    # Chip bar should now contain a year chip.
+    page.wait_for_selector("#filter-chips .chip", timeout=5_000)
+    assert page.evaluate("() => document.querySelectorAll('#filter-chips .chip').length") == 1
+
+    # Remove the chip via its × button → chip disappears.
+    page.click("#filter-chips .chip .x")
+    page.wait_for_function(
+        "() => document.querySelectorAll('#filter-chips .chip').length === 0",
+        timeout=5_000,
+    )
+
+
+def test_hex_view_at_low_zoom(page: Page, app_url):
+    """Hex overlay must still render at country-level zoom."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    base = app_url.split("#")[0]
+    page.goto(f"{base}#z=4&ll=53,-1&preset=all", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => window.__rm && window.__rm.hexOn && window.__rm.hexOn()",
+        timeout=20_000,
+    )
+    assert page.evaluate("() => window.__rm.hexOn()"), "hex layer not active at low zoom"
 
 
 # ---------- Mobile ----------------------------------------------------------

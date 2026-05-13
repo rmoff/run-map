@@ -50,6 +50,56 @@
     <button data-view="dense">Most traversed area</button>
   </div>
 
+  <!-- Display popover (anchored under the 🗺 control) -->
+  <div id="display-menu" class="hidden" role="menu">
+    <label for="base-layer">Base layer</label>
+    <select id="base-layer">
+      <option>Topo (OpenTopoMap)</option>
+      <option>OpenStreetMap</option>
+      <option>Light (Carto)</option>
+      <option>Cycle (CyclOSM)</option>
+      <option>Satellite</option>
+    </select>
+    <label for="base-opacity">Base opacity: <span id="opacity-label">50</span>%</label>
+    <input type="range" id="base-opacity" min="10" max="100" step="5" value="50">
+    <label class="check-row">
+      <input type="checkbox" id="heatmap-toggle">
+      Heatmap overlay
+    </label>
+  </div>
+
+  <!-- Filter chip bar (top-center) -->
+  <div id="filter-bar">
+    <div id="filter-chips"></div>
+    <button id="add-filter" class="chip add" type="button" title="Add filter">+ Filter</button>
+  </div>
+
+  <!-- Add-filter popover -->
+  <div id="filter-menu" class="hidden" role="menu">
+    <div class="row">
+      <label for="filter-year">Year</label>
+      <select id="filter-year" multiple size="6"></select>
+    </div>
+    <div class="row">
+      <label for="filter-type">Type</label>
+      <select id="filter-type">
+        <option value="">Any</option>
+        <option value="Run">Road</option>
+        <option value="TrailRun">Trail</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Distance (km)</label>
+      <input type="number" id="filter-min-km" placeholder="min" min="0" step="1" style="width:6em">
+      <span>–</span>
+      <input type="number" id="filter-max-km" placeholder="max" min="0" step="1" style="width:6em">
+    </div>
+    <div class="row" style="justify-content:flex-end">
+      <button id="filter-clear" class="ghost">Clear all</button>
+      <button id="filter-apply">Apply</button>
+    </div>
+  </div>
+
   <!-- Settings drawer -->
   <aside id="settings-drawer" class="hidden" aria-hidden="true">
     <header>
@@ -63,24 +113,12 @@
         <div id="stats-content"><p class="muted">No data yet.</p></div>
       </section>
 
-      <h3>Map</h3>
-      <label for="base-layer">Base layer</label>
-      <select id="base-layer">
-        <option>Topo (OpenTopoMap)</option>
-        <option>OpenStreetMap</option>
-        <option>Light (Carto)</option>
-        <option>Cycle (CyclOSM)</option>
-        <option>Satellite</option>
-      </select>
-      <label for="base-opacity">Base opacity: <span id="opacity-label">50</span>%</label>
-      <input type="range" id="base-opacity" min="10" max="100" step="5" value="50">
-
+      <h3>Click behaviour</h3>
       <label for="search-radius">Search radius: <span id="search-radius-label">auto</span></label>
       <div class="row">
         <input type="range" id="search-radius" min="0" max="500" step="10" value="0" style="flex:1">
         <button id="apply-radius" class="ghost">Apply</button>
       </div>
-
 
       <label class="check-row">
         <input type="checkbox" id="lock-to-track" checked>

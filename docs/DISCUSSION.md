@@ -39,6 +39,48 @@ Final form: `threading.local()` — each FastAPI worker holds its own DuckDB con
 
 Added a clickable year-bar chart in settings: clicking a year filtered the loaded tracks to that year. Worked, but cluttered the filter model (year vs preset vs polygon vs banner-vs-no-banner). User wants to think about it more cleanly — bar chart stays as a stat visualisation, click-to-filter is gone.
 
+### Bulk-tracks load → aggregate layer + on-demand match polylines
+
+Original design loaded every track on boot and rendered them all as translucent Leaflet features. Two problems converged:
+
+1. **Wire/parse cost.** `/tracks.geojson` was ~13 MB raw / 3.5 MB gzipped, then `JSON.parse` + ~3400 `L.geoJSON` features cost ~1–2 s of main-thread time.
+2. **Two visual jobs in one layer.** The stacked-alpha trick was both "give me bearings + clickability" and "show me where I run a lot". It did neither well — overlapping-alpha is a poor heatmap (not a real density function), and 1700 polylines on the same road just looked like noise.
+
+Split into three layers:
+
+- **Aggregate layer** (`/aggregate.geojson`): one deduped MultiLineString of every road/trail you've ever run. Snap-to-grid (~33 m) + pair-segment dedup. Drawn as a single blue Leaflet GeoJSON. Job: bearings + something to click.
+- **Heatmap overlay** (`/heatmap.json`, `leaflet.heat`): proper Gaussian-kernel density on densely-sampled points. Job: "I've run this a lot" signal. Toggleable; auto-hides while a match is active because the precise red lines carry the signal once you've zeroed in.
+- **Match polylines on demand**: `/match*` ships simplified per-track geometry inline. Client builds Leaflet polylines for the matched set only. No bulk pre-load needed.
+
+Side effect: with no per-track Leaflet features, `snap-to-nearest-track` lock-to-track walks the flat aggregate segment list instead of every loaded layer — same algorithm, simpler data.
+
+### Aggregate ghosting: dropping ST_Simplify
+
+First aggregate implementation ran `ST_Simplify(track, 5e-5)` per track *before* snapping to grid. Looked correct in unit tests but produced visible ghost-parallel lines for the same urban road. Cause: Douglas-Peucker picks different "important" vertices per track based on each track's exact wiggles, so post-snap two runs on the same road end up with different segment endpoint sets. Each contributes its own ghosts.
+
+Fix: drop the simplification. Snap the dense GPS sequence directly. Two runs over the same road traverse the same cell sequence and dedupe cleanly. Total segment count went *up* slightly (110 k vs 80 k) because no DP-pruning, but ghosts went away.
+
+### Heatmap pulses: dedicated /heatmap.json
+
+First heatmap attempt fed `leaflet.heat` from `/index.json` samples — 8 points per track. At running pace that's a point every ~1.25 km, so the Gaussian kernel painted **discrete pulses** along the route instead of a continuous line. Split into a dedicated `/heatmap.json` endpoint with denser sampling (every 8th vertex ≈ every 30 m of real ground), lazy-fetched only when the toggle is on. `/index.json` stays lean for hex aggregation + view-fit + auto-match — those don't need density.
+
+### Disk-cached gzipped responses → sendfile
+
+In-memory caches for the boot blobs only survived until container restart. The first user always paid the full DuckDB-build + JSON-encode + gzip cost. Moved to `_serve_cached(sig, build)`: writes `gzip.compress(body)` to `data/cache/<sig>.json.gz` on first miss, then returns `FileResponse` with `Content-Encoding: gzip`. Starlette uses `sendfile` so Python is out of the loop on warm requests. Cached request: ~4 s → ~7 ms. Filter combos hash to their own cache file.
+
+### Filter chips reintroduced
+
+The year-chart filter was removed pending a rethink (above). Came back, properly: a top-centre **chip bar** with year (multi-select), type (Run/TrailRun), distance min/max. Filters flow as query params through every data endpoint (aggregate, heatmap, index, match) and into the disk-cache key. Persisted in the URL hash (`fyears`, `ftype`, `fmin`, `fmax`) so the working set is shareable.
+
+UX rule that fell out of the discussion: filters narrow the **universe**, the map shows that universe, clicks match within it. One model, not two. The map dims the aggregate layer while a match is active so the red precise tracks lead, but the rest of the filtered universe stays visible as context.
+
+### Settings drawer → split into display popover + data drawer
+
+Settings drawer was a mixed bag: base layer, opacity, heatmap toggle, search radius, lock-to-track, Strava sync, ZIP import. Split by access frequency:
+
+- **🗺 display popover** (new Leaflet control next to ⟲): base layer, opacity, heatmap. Frequent toggles; one click in/one click out.
+- **⚙ settings drawer**: search radius, click-behaviour toggles, Strava API, ZIP import, library stats. Infrequent — fine behind a drawer.
+
 ## Hard-won UX decisions
 
 - **Reset menu options are zoom criteria, not data filters.** Putting "Last 90 days" in a dismissable banner was wrong because "dismiss" has no clear semantics.
@@ -51,10 +93,10 @@ Added a clickable year-bar chart in settings: clicking a year filtered the loade
 
 ## Performance lessons
 
-- `/tracks.geojson` is ~13 MB raw / ~3.5 MB gzipped. Server-side cache pre-serialises the JSON once and serves bytes directly — cold to warm goes from ~3 s to ~18 ms.
-- The remaining bottleneck is **client-side**: `JSON.parse(12 MB)` ≈ 200–300 ms + `L.geoJSON` instantiating ~3400 path features ≈ 1–2 s. Both block the main thread.
-- **Viewport-first load** addresses the perceived cold-start: fetch tracks intersecting the saved bbox first, render them, *then* background-load the rest in chunks of 75 features with `setTimeout(0)` yields between chunks. Clicks during the background load are processed between chunks.
-- **Don't show a modal spinner for background work.** A small bottom-centre pill ("Loading 600/1700 more tracks…") indicates activity without blocking interaction.
+- The original `/tracks.geojson` bulk load is gone. Boot now fetches `/index.json` + `/aggregate.geojson` only; per-track geometry rides inline with `/match*` responses.
+- Disk-cached gzipped responses served via `FileResponse` + `Content-Encoding: gzip` let Starlette use `sendfile`. Cached request goes from ~4 s (build + gzip + encode) to ~7 ms. Filter combos hash to their own cache file under `data/cache/`.
+- The aggregate dedupe key is **`(min(a,b), max(a,b))`** — sorting the pair ensures forwards and backwards runs over the same road collide. Direction-blind by construction.
+- Heatmap density needs a **dedicated** dense-sample feed. Reusing the lean per-activity samples produced visible pulses; the kernel needs roughly one point per kernel-radius worth of real ground (~30 m here).
 
 ## Things to look at next
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import hashlib
 import json
 import tempfile
 import threading
@@ -62,105 +64,131 @@ def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+# ---- Filters --------------------------------------------------------------
+#
+# The map endpoints share a small set of attribute filters: which years to
+# include, which run type, distance window. They translate to one shared
+# WHERE clause. `_filter_clause` returns both the SQL fragment and a stable
+# signature dict — the dict feeds the on-disk cache key.
+
+
+def _filter_clause(
+    years: str | None = None,
+    type: str | None = None,
+    min_km: float | None = None,
+    max_km: float | None = None,
+) -> tuple[list[str], list, dict]:
+    where: list[str] = []
+    params: list = []
+    sig: dict = {}
+    if years:
+        ys = [int(y) for y in years.split(",") if y.strip().isdigit()]
+        if ys:
+            placeholders = ",".join("?" for _ in ys)
+            where.append(f"EXTRACT(year FROM start_time) IN ({placeholders})")
+            params.extend(ys)
+            sig["years"] = sorted(set(ys))
+    if type:
+        where.append("type = ?")
+        params.append(type)
+        sig["type"] = type
+    if min_km is not None:
+        where.append("distance_m >= ?")
+        params.append(min_km * 1000.0)
+        sig["min_km"] = min_km
+    if max_km is not None:
+        where.append("distance_m < ?")
+        params.append(max_km * 1000.0)
+        sig["max_km"] = max_km
+    return where, params, sig
+
+
+# ---- Disk cache -----------------------------------------------------------
+#
+# Boot blobs (/index.json, /aggregate.geojson, /heatmap.json) are expensive
+# to build and don't change between ingests, so we gzip them to
+# `<RUN_MAP_DB parent>/cache/<sig>.gz` and serve via `FileResponse` — which
+# uses sendfile, so Python never touches the bytes on the hot path.
+#
+# Filter combinations produce additional cache entries; the unfiltered case
+# is the common one. `_invalidate_caches()` clears the whole dir.
+
+_CACHE_DIR = db.DB_PATH.parent / "cache"
+
+
+def _cache_sig(name: str, sig: dict) -> str:
+    if not sig:
+        return name
+    h = hashlib.sha1(json.dumps(sig, sort_keys=True).encode()).hexdigest()[:10]
+    return f"{name}.{h}"
+
+
+def _cache_path(sig_str: str) -> Path:
+    _CACHE_DIR.mkdir(exist_ok=True)
+    return _CACHE_DIR / f"{sig_str}.json.gz"
+
+
+def _serve_cached(sig_str: str, build: callable) -> Response:
+    p = _cache_path(sig_str)
+    if not p.exists():
+        body = build()
+        p.write_bytes(gzip.compress(body, compresslevel=6))
+    return FileResponse(
+        p,
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip", "Cache-Control": "no-store"},
+    )
+
+
+def _invalidate_caches() -> None:
+    if _CACHE_DIR.exists():
+        for p in _CACHE_DIR.glob("*.json.gz"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+# Back-compat alias — kept so any external imports don't break.
+_invalidate_tracks_cache = _invalidate_caches  # back-compat
+
+
 # ---- Queries --------------------------------------------------------------
 
-_tracks_cache: dict[tuple, bytes] = {}
 
-
-def _invalidate_tracks_cache() -> None:
-    _tracks_cache.clear()
-
-
-def _bbox_to_wkt(bbox: str) -> str | None:
-    try:
-        minlon, minlat, maxlon, maxlat = (float(x) for x in bbox.split(","))
-    except (ValueError, AttributeError):
-        return None
-    return (
-        f"POLYGON(({minlon} {minlat}, {maxlon} {minlat}, "
-        f"{maxlon} {maxlat}, {minlon} {maxlat}, {minlon} {minlat}))"
-    )
-
-
-def _build_tracks_geojson(
-    from_: str | None, to: str | None, bbox: str | None, exclude_bbox: str | None
-) -> bytes:
-    where = []
-    params: list = []
-    if from_:
-        where.append("start_time >= ?")
-        params.append(from_)
-    if to:
-        where.append("start_time < ?")
-        params.append(to)
-    if bbox:
-        wkt = _bbox_to_wkt(bbox)
-        if wkt:
-            where.append("ST_Intersects(track, ST_GeomFromText(?))")
-            params.append(wkt)
-    if exclude_bbox:
-        wkt = _bbox_to_wkt(exclude_bbox)
-        if wkt:
-            where.append("NOT ST_Intersects(track, ST_GeomFromText(?))")
-            params.append(wkt)
-    sql = (
-        "SELECT id, start_time, name, distance_m, strava_url, type, ST_AsGeoJSON(track) "
-        "FROM activities"
-    )
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    rows = _db_fetchall(sql, params)
-    features = [
-        {
-            "type": "Feature",
-            "geometry": json.loads(r[6]),
-            "properties": {
-                "id": r[0],
-                "start_time": r[1].isoformat() if r[1] else None,
-                "name": r[2],
-                "distance_m": r[3],
-                "strava_url": r[4],
-                "activity_type": r[5],
-            },
-        }
-        for r in rows
-        if r[6]
-    ]
-    return json.dumps({"type": "FeatureCollection", "features": features}).encode()
-
-
-@app.get("/tracks.geojson")
-def tracks(
-    from_: str | None = Query(None, alias="from"),
-    to: str | None = Query(None),
-    bbox: str | None = Query(None),
-    exclude_bbox: str | None = Query(None),
-) -> Response:
-    """Cached pre-serialized GeoJSON. Hot path: ~ms instead of seconds.
-    Only the no-bbox variants are cached — bbox calls are rare and small."""
-    if not bbox and not exclude_bbox:
-        key = (from_, to)
-        body = _tracks_cache.get(key)
-        if body is None:
-            body = _build_tracks_geojson(from_, to, None, None)
-            _tracks_cache[key] = body
-    else:
-        body = _build_tracks_geojson(from_, to, bbox, exclude_bbox)
-    return Response(content=body, media_type="application/json")
+def _geometry_to_latlngs(geojson_str: str | None) -> list[list[float]]:
+    """Convert a GeoJSON LineString / MultiLineString to a flat list of [lat,
+    lng] pairs. MultiLineString segments are concatenated — the rendering side
+    treats each match as a single polyline, which is what the existing UI
+    expects."""
+    if not geojson_str:
+        return []
+    g = json.loads(geojson_str)
+    t = g.get("type")
+    coords = g.get("coordinates") or []
+    if t == "LineString":
+        return [[c[1], c[0]] for c in coords]
+    if t == "MultiLineString":
+        out: list[list[float]] = []
+        for line in coords:
+            out.extend([c[1], c[0]] for c in line)
+        return out
+    return []
 
 
 def _match_rows(rows) -> list[dict]:
-    return [
-        {
+    out = []
+    for r in rows:
+        out.append({
             "id": r[0],
             "start_time": r[1].isoformat() if r[1] else None,
             "name": r[2],
             "distance_m": r[3],
             "strava_url": r[4],
             "activity_type": r[5] if len(r) > 5 else None,
-        }
-        for r in rows
-    ]
+            "geometry": _geometry_to_latlngs(r[6]) if len(r) > 6 else [],
+        })
+    return out
 
 
 @app.get("/count")
@@ -194,42 +222,219 @@ def stats() -> dict:
     }
 
 
+# Tolerance for ST_Simplify on match geometries — ~1m at the equator. Tracks
+# get smaller without visible loss, and the precise red match polylines stay
+# crisp at zoom 18.
+_MATCH_SIMPLIFY_TOL = 1e-5
+
+
 @app.get("/match")
-def match_point(lat: float, lon: float, r: float) -> list[dict]:
-    """Runs whose track came within `r` metres of (lat, lon)."""
+def match_point(
+    lat: float, lon: float, r: float,
+    years: str | None = None, type: str | None = None,
+    min_km: float | None = None, max_km: float | None = None,
+) -> list[dict]:
+    """Runs whose track came within `r` metres of (lat, lon). Each match
+    carries its simplified polyline so the client can render the precise
+    track without having loaded the bulk track set."""
     radius_deg = r / 111_000.0
-    rows = _db_fetchall(
-        """
-        SELECT id, start_time, name, distance_m, strava_url, type
-        FROM activities
-        WHERE ST_DWithin(track, ST_Point(?, ?), ?)
-        ORDER BY start_time DESC
-        """,
-        [lon, lat, radius_deg],
+    where = ["ST_DWithin(track, ST_Point(?, ?), ?)"]
+    params: list = [lon, lat, radius_deg]
+    fwhere, fparams, _ = _filter_clause(years, type, min_km, max_km)
+    where.extend(fwhere)
+    params.extend(fparams)
+    sql = (
+        "SELECT id, start_time, name, distance_m, strava_url, type, "
+        "       ST_AsGeoJSON(ST_Simplify(track, ?)) "
+        "FROM activities WHERE " + " AND ".join(where) + " ORDER BY start_time DESC"
     )
+    rows = _db_fetchall(sql, [_MATCH_SIMPLIFY_TOL] + params)
     return _match_rows(rows)
 
 
 @app.post("/match/polygon")
 def match_polygon(
     wkt: str = Form(...),
-    from_: str | None = Form(None, alias="from"),
-    to: str | None = Form(None),
+    years: str | None = Form(None),
+    type: str | None = Form(None),
+    min_km: float | None = Form(None),
+    max_km: float | None = Form(None),
 ) -> list[dict]:
     where = ["ST_Intersects(track, ST_GeomFromText(?))"]
     params: list = [wkt]
-    if from_:
-        where.append("start_time >= ?")
-        params.append(from_)
-    if to:
-        where.append("start_time < ?")
-        params.append(to)
+    fwhere, fparams, _ = _filter_clause(years, type, min_km, max_km)
+    where.extend(fwhere)
+    params.extend(fparams)
     sql = (
-        "SELECT id, start_time, name, distance_m, strava_url, type "
+        "SELECT id, start_time, name, distance_m, strava_url, type, "
+        "       ST_AsGeoJSON(ST_Simplify(track, ?)) "
         "FROM activities WHERE " + " AND ".join(where) + " ORDER BY start_time DESC"
     )
-    rows = _db_fetchall(sql, params)
+    rows = _db_fetchall(sql, [_MATCH_SIMPLIFY_TOL] + params)
     return _match_rows(rows)
+
+
+# ---- Aggregate path layer + per-activity index + heatmap -----------------
+
+# Snap grid for aggregate dedupe. ~3e-4° latitude ≈ 33 m. Coarse enough to
+# absorb the GPS drift you get between repeated runs on the same urban road;
+# fine enough that adjacent parallel streets stay distinct.
+_AGG_GRID = 3e-4
+# Coarse samples per track in /index.json — feeds hex aggregation + view-fit
+# + auto-match. Eight points is plenty for those uses.
+_INDEX_SAMPLES = 8
+# Step (in vertices, not metres) for the heatmap sample. Most tracks log at
+# 1 Hz and ~4 m/s, so every 8th vertex ≈ every 30 m on real ground — well
+# inside the Gaussian kernel reach, so the heatmap paints a continuous line
+# along the route rather than discrete pulses.
+_HEATMAP_STEP = 8
+
+
+def _coords_from_geojson(geojson_str: str) -> list[list[float]]:
+    """Return [[lon, lat], ...]. Flatten MultiLineString."""
+    g = json.loads(geojson_str)
+    t = g.get("type")
+    coords = g.get("coordinates") or []
+    if t == "LineString":
+        return coords
+    if t == "MultiLineString":
+        out: list[list[float]] = []
+        for line in coords:
+            out.extend(line)
+        return out
+    return []
+
+
+def _filtered_rows(cols: str, **filters) -> list:
+    where, params, _ = _filter_clause(**filters)
+    sql = f"SELECT {cols} FROM activities"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    return _db_fetchall(sql, params)
+
+
+def _build_index(**filters) -> bytes:
+    rows = _filtered_rows(
+        "id, start_time, type, distance_m, ST_AsGeoJSON(track)", **filters
+    )
+    entries = []
+    for r in rows:
+        coords = _coords_from_geojson(r[4]) if r[4] else []
+        if not coords:
+            continue
+        step = max(1, len(coords) // _INDEX_SAMPLES)
+        samples = [[coords[i][1], coords[i][0]] for i in range(0, len(coords), step)]
+        lats = [c[1] for c in coords]
+        lons = [c[0] for c in coords]
+        entries.append({
+            "id": r[0],
+            "start_time": r[1].isoformat() if r[1] else None,
+            "type": r[2],
+            "distance_m": r[3],
+            "samples": samples,
+            "bbox": [min(lons), min(lats), max(lons), max(lats)],
+        })
+    return json.dumps({"activities": entries}).encode()
+
+
+def _build_aggregate(**filters) -> bytes:
+    """Snap-to-grid + dedupe segments across every track.
+
+    Each consecutive `(a, b)` pair in a track is snapped to the `_AGG_GRID`
+    cell and normalised so `(a, b)` and `(b, a)` collide into the same key.
+    No upstream simplification: Douglas-Peucker would pick different
+    "important" vertices per track and produce ghost segments where two runs
+    followed the same road — the dense, snap-to-cells walk dedupes properly.
+    """
+    rows = _filtered_rows("ST_AsGeoJSON(track)", **filters)
+    grid = _AGG_GRID
+    seen: set = set()
+    segments: list[list[list[float]]] = []
+    for (gj,) in rows:
+        if not gj:
+            continue
+        prev = None
+        for c in _coords_from_geojson(gj):
+            snapped = (round(c[0] / grid) * grid, round(c[1] / grid) * grid)
+            if prev is None:
+                prev = snapped
+                continue
+            if snapped == prev:
+                continue
+            key = (prev, snapped) if prev < snapped else (snapped, prev)
+            if key not in seen:
+                seen.add(key)
+                segments.append([[prev[0], prev[1]], [snapped[0], snapped[1]]])
+            prev = snapped
+    geometry = {"type": "MultiLineString", "coordinates": segments}
+    feature = {"type": "Feature", "geometry": geometry, "properties": {
+        "segment_count": len(segments),
+    }}
+    return json.dumps({"type": "FeatureCollection", "features": [feature]}).encode()
+
+
+def _build_heatmap(**filters) -> bytes:
+    """Dense per-track points for the heatmap. Step picked so the heatmap
+    kernel sees an effectively continuous line along the route."""
+    rows = _filtered_rows("ST_AsGeoJSON(track)", **filters)
+    points: list[list[float]] = []
+    step = _HEATMAP_STEP
+    for (gj,) in rows:
+        if not gj:
+            continue
+        coords = _coords_from_geojson(gj)
+        for i in range(0, len(coords), step):
+            points.append([coords[i][1], coords[i][0]])
+    return json.dumps({"points": points}).encode()
+
+
+@app.get("/index.json")
+def activity_index(
+    years: str | None = None, type: str | None = None,
+    min_km: float | None = None, max_km: float | None = None,
+) -> Response:
+    _, _, sig = _filter_clause(years, type, min_km, max_km)
+    return _serve_cached(
+        _cache_sig("index", sig),
+        lambda: _build_index(years=years, type=type, min_km=min_km, max_km=max_km),
+    )
+
+
+@app.get("/aggregate.geojson")
+def aggregate_geojson(
+    years: str | None = None, type: str | None = None,
+    min_km: float | None = None, max_km: float | None = None,
+) -> Response:
+    _, _, sig = _filter_clause(years, type, min_km, max_km)
+    return _serve_cached(
+        _cache_sig("aggregate", sig),
+        lambda: _build_aggregate(years=years, type=type, min_km=min_km, max_km=max_km),
+    )
+
+
+@app.get("/heatmap.json")
+def heatmap_json(
+    years: str | None = None, type: str | None = None,
+    min_km: float | None = None, max_km: float | None = None,
+) -> Response:
+    _, _, sig = _filter_clause(years, type, min_km, max_km)
+    return _serve_cached(
+        _cache_sig("heatmap", sig),
+        lambda: _build_heatmap(years=years, type=type, min_km=min_km, max_km=max_km),
+    )
+
+
+@app.get("/filter-options")
+def filter_options() -> dict:
+    """Years and types present in the library — feeds the filter chip menu."""
+    years = [int(y) for (y,) in _db_fetchall(
+        "SELECT DISTINCT EXTRACT(year FROM start_time)::INT FROM activities "
+        "WHERE start_time IS NOT NULL ORDER BY 1 DESC"
+    )]
+    types = [t for (t,) in _db_fetchall(
+        "SELECT DISTINCT type FROM activities WHERE type IS NOT NULL ORDER BY 1"
+    )]
+    return {"years": years, "types": types}
 
 
 # ---- Bulk ingest ----------------------------------------------------------
@@ -256,7 +461,7 @@ def _run_import_thread(root: Path) -> None:
             _import_state["message"] = f"Importing {done}/{total} · {label[:50]}"
     try:
         inserted, unreadable = ingest_bulk.ingest(root, progress_cb=on_progress)
-        _invalidate_tracks_cache()
+        _invalidate_caches()
         with _import_lock:
             _import_state.update({
                 "running": False, "phase": "done",
@@ -414,7 +619,7 @@ def _run_sync_thread(tokens: dict, since: int | None) -> None:
         inserted, skipped = ingest_strava.sync_with_tokens(
             tokens, since_epoch=since, on_wait=on_wait, on_progress=on_progress
         )
-        _invalidate_tracks_cache()
+        _invalidate_caches()
         with _sync_lock:
             _sync_state.update({
                 "running": False, "phase": "done",
@@ -562,7 +767,7 @@ def strava_fix_types() -> dict:
                     _db_exec("UPDATE activities SET type = ? WHERE id = ?", [t, int(a["id"])])
                     updated += 1
             page += 1
-    _invalidate_tracks_cache()
+    _invalidate_caches()
     return {"examined": examined, "updated": updated}
 
 

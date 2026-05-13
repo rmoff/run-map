@@ -293,6 +293,96 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
 #view-menu button:last-child { border-bottom: none; }
 #view-menu button:hover { background: #f0f6fb; }
 
+/* ---- Display popover (base layer / opacity / heatmap) ---- */
+#display-menu {
+  position: absolute;
+  z-index: 1100;
+  background: white;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.18);
+  padding: 10px 12px;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: .9rem;
+}
+#display-menu label { display: block; margin-top: 4px; color: #444; font-size: .82rem; }
+#display-menu select, #display-menu input[type="range"] { width: 100%; }
+#display-menu .check-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+
+/* ---- Filter chip bar (top-center) ---- */
+#filter-bar {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1050;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-width: calc(100vw - 200px);
+  pointer-events: none;
+}
+#filter-chips, #filter-bar > .chip {
+  pointer-events: auto;
+}
+#filter-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: white;
+  border: 1px solid rgba(0,0,0,0.15);
+  border-radius: 14px;
+  padding: 3px 10px;
+  font-size: .82rem;
+  color: #1a5a8a;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  cursor: default;
+  white-space: nowrap;
+}
+.chip .x {
+  display: inline-block;
+  margin-left: 4px;
+  color: #888;
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0 2px;
+}
+.chip .x:hover { color: #c23; }
+.chip.add {
+  cursor: pointer;
+  color: #444;
+  background: rgba(255,255,255,0.85);
+}
+.chip.add:hover { background: white; color: #1a5a8a; }
+
+/* ---- Filter add menu ---- */
+#filter-menu {
+  position: absolute;
+  z-index: 1100;
+  background: white;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.18);
+  padding: 12px;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: .9rem;
+}
+#filter-menu .row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#filter-menu label { color: #444; min-width: 5em; }
+#filter-menu select#filter-year { flex: 1; }
+
 /* ---- Activity preview card ---- */
 #preview-panel {
   /* now stacks below #matches-panel inside #right-rail */
