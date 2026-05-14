@@ -14,3 +14,9 @@ data/
 .streamlit/secrets.toml
 .DS_Store
 _probe.py
+
+docs/superpowers
+docs/img/ux-audit
+docs/UX-AUDIT.md
+docs/TODO.md
+docs/DISCUSSION.md
