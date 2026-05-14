@@ -72,8 +72,18 @@ def index() -> FileResponse:
 # signature dict — the dict feeds the on-disk cache key.
 
 
+def _parse_iso_date(s: str, field: str) -> str:
+    # Returns the ISO date string after validation. Throws 400 on bad input.
+    try:
+        datetime.fromisoformat(s).date()
+    except ValueError:
+        raise HTTPException(400, f"Invalid {field} (expected YYYY-MM-DD): {s!r}")
+    return s
+
+
 def _filter_clause(
-    years: str | None = None,
+    date_start: str | None = None,
+    date_end: str | None = None,
     type: str | None = None,
     min_km: float | None = None,
     max_km: float | None = None,
@@ -81,13 +91,16 @@ def _filter_clause(
     where: list[str] = []
     params: list = []
     sig: dict = {}
-    if years:
-        ys = [int(y) for y in years.split(",") if y.strip().isdigit()]
-        if ys:
-            placeholders = ",".join("?" for _ in ys)
-            where.append(f"EXTRACT(year FROM start_time) IN ({placeholders})")
-            params.extend(ys)
-            sig["years"] = sorted(set(ys))
+    if date_start:
+        ds = _parse_iso_date(date_start, "date_start")
+        where.append("start_time::DATE >= ?")
+        params.append(ds)
+        sig["date_start"] = ds
+    if date_end:
+        de = _parse_iso_date(date_end, "date_end")
+        where.append("start_time::DATE <= ?")
+        params.append(de)
+        sig["date_end"] = de
     if type:
         where.append("type = ?")
         params.append(type)
@@ -151,6 +164,22 @@ def _invalidate_caches() -> None:
 
 # Back-compat alias — kept so any external imports don't break.
 _invalidate_tracks_cache = _invalidate_caches  # back-compat
+
+
+def _warm_default_aggregates() -> None:
+    """Pre-build the no-filter aggregate at every LOD so first paint after an
+    ingest is cache-warm. Filtered combos stay lazy.
+
+    Defined above `_build_aggregate` and `_cache_sig` users only by file
+    position; both symbols resolve at call time.
+    """
+    for lod in _AGG_LODS:
+        sig = _cache_sig("aggregate", {"lod": lod})
+        p = _cache_path(sig)
+        if p.exists():
+            continue
+        body = _build_aggregate(lod=lod)
+        p.write_bytes(gzip.compress(body, compresslevel=6))
 
 
 # ---- Queries --------------------------------------------------------------
@@ -231,7 +260,8 @@ _MATCH_SIMPLIFY_TOL = 1e-5
 @app.get("/match")
 def match_point(
     lat: float, lon: float, r: float,
-    years: str | None = None, type: str | None = None,
+    date_start: str | None = None, date_end: str | None = None,
+    type: str | None = None,
     min_km: float | None = None, max_km: float | None = None,
 ) -> list[dict]:
     """Runs whose track came within `r` metres of (lat, lon). Each match
@@ -240,7 +270,7 @@ def match_point(
     radius_deg = r / 111_000.0
     where = ["ST_DWithin(track, ST_Point(?, ?), ?)"]
     params: list = [lon, lat, radius_deg]
-    fwhere, fparams, _ = _filter_clause(years, type, min_km, max_km)
+    fwhere, fparams, _ = _filter_clause(date_start, date_end, type, min_km, max_km)
     where.extend(fwhere)
     params.extend(fparams)
     sql = (
@@ -255,14 +285,15 @@ def match_point(
 @app.post("/match/polygon")
 def match_polygon(
     wkt: str = Form(...),
-    years: str | None = Form(None),
+    date_start: str | None = Form(None),
+    date_end: str | None = Form(None),
     type: str | None = Form(None),
     min_km: float | None = Form(None),
     max_km: float | None = Form(None),
 ) -> list[dict]:
     where = ["ST_Intersects(track, ST_GeomFromText(?))"]
     params: list = [wkt]
-    fwhere, fparams, _ = _filter_clause(years, type, min_km, max_km)
+    fwhere, fparams, _ = _filter_clause(date_start, date_end, type, min_km, max_km)
     where.extend(fwhere)
     params.extend(fparams)
     sql = (
@@ -276,10 +307,18 @@ def match_polygon(
 
 # ---- Aggregate path layer + per-activity index + heatmap -----------------
 
-# Snap grid for aggregate dedupe. ~3e-4° latitude ≈ 33 m. Coarse enough to
-# absorb the GPS drift you get between repeated runs on the same urban road;
-# fine enough that adjacent parallel streets stay distinct.
-_AGG_GRID = 3e-4
+# Snap grids for aggregate dedupe, keyed by zoom band. Each LOD is a separate
+# pre-built layer the client swaps to on `zoomend`:
+#   low  (~50 m)  for z 11–13 — neighbourhood overview, streets blur anyway
+#   mid  (~33 m)  for z 14–15 — historic default, balances drift vs distinctness
+#   high (~10 m)  for z 16+   — individual paths through fields / woods, also
+#                               the LOD the client always uses for snap-to-track
+# Server owns the band names; client sends `?lod=<name>`. Grids are degrees of
+# latitude (rough metres at this latitude in the comment above each).
+_AGG_LODS: dict[str, float] = {"low": 4.5e-4, "mid": 3e-4, "high": 9e-5}
+_AGG_LOD_DEFAULT = "mid"
+# Back-compat alias for any caller that still wants the historical fixed grid.
+_AGG_GRID = _AGG_LODS[_AGG_LOD_DEFAULT]
 # Coarse samples per track in /index.json — feeds hex aggregation + view-fit
 # + auto-match. Eight points is plenty for those uses.
 _INDEX_SAMPLES = 8
@@ -337,17 +376,17 @@ def _build_index(**filters) -> bytes:
     return json.dumps({"activities": entries}).encode()
 
 
-def _build_aggregate(**filters) -> bytes:
+def _build_aggregate(*, lod: str = _AGG_LOD_DEFAULT, **filters) -> bytes:
     """Snap-to-grid + dedupe segments across every track.
 
-    Each consecutive `(a, b)` pair in a track is snapped to the `_AGG_GRID`
+    Each consecutive `(a, b)` pair in a track is snapped to the `_AGG_LODS[lod]`
     cell and normalised so `(a, b)` and `(b, a)` collide into the same key.
     No upstream simplification: Douglas-Peucker would pick different
     "important" vertices per track and produce ghost segments where two runs
     followed the same road — the dense, snap-to-cells walk dedupes properly.
     """
     rows = _filtered_rows("ST_AsGeoJSON(track)", **filters)
-    grid = _AGG_GRID
+    grid = _AGG_LODS[lod]
     seen: set = set()
     segments: list[list[list[float]]] = []
     for (gj,) in rows:
@@ -390,51 +429,63 @@ def _build_heatmap(**filters) -> bytes:
 
 @app.get("/index.json")
 def activity_index(
-    years: str | None = None, type: str | None = None,
+    date_start: str | None = None, date_end: str | None = None,
+    type: str | None = None,
     min_km: float | None = None, max_km: float | None = None,
 ) -> Response:
-    _, _, sig = _filter_clause(years, type, min_km, max_km)
+    _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km)
     return _serve_cached(
         _cache_sig("index", sig),
-        lambda: _build_index(years=years, type=type, min_km=min_km, max_km=max_km),
+        lambda: _build_index(date_start=date_start, date_end=date_end,
+                             type=type, min_km=min_km, max_km=max_km),
     )
 
 
 @app.get("/aggregate.geojson")
 def aggregate_geojson(
-    years: str | None = None, type: str | None = None,
+    date_start: str | None = None, date_end: str | None = None,
+    type: str | None = None,
     min_km: float | None = None, max_km: float | None = None,
+    lod: str = _AGG_LOD_DEFAULT,
 ) -> Response:
-    _, _, sig = _filter_clause(years, type, min_km, max_km)
+    if lod not in _AGG_LODS:
+        raise HTTPException(400, f"Unknown lod '{lod}'. Expected one of: {sorted(_AGG_LODS)}")
+    _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km)
+    sig = {**sig, "lod": lod}
     return _serve_cached(
         _cache_sig("aggregate", sig),
-        lambda: _build_aggregate(years=years, type=type, min_km=min_km, max_km=max_km),
+        lambda: _build_aggregate(lod=lod, date_start=date_start, date_end=date_end,
+                                  type=type, min_km=min_km, max_km=max_km),
     )
 
 
 @app.get("/heatmap.json")
 def heatmap_json(
-    years: str | None = None, type: str | None = None,
+    date_start: str | None = None, date_end: str | None = None,
+    type: str | None = None,
     min_km: float | None = None, max_km: float | None = None,
 ) -> Response:
-    _, _, sig = _filter_clause(years, type, min_km, max_km)
+    _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km)
     return _serve_cached(
         _cache_sig("heatmap", sig),
-        lambda: _build_heatmap(years=years, type=type, min_km=min_km, max_km=max_km),
+        lambda: _build_heatmap(date_start=date_start, date_end=date_end,
+                               type=type, min_km=min_km, max_km=max_km),
     )
 
 
 @app.get("/filter-options")
 def filter_options() -> dict:
-    """Years and types present in the library — feeds the filter chip menu."""
-    years = [int(y) for (y,) in _db_fetchall(
-        "SELECT DISTINCT EXTRACT(year FROM start_time)::INT FROM activities "
-        "WHERE start_time IS NOT NULL ORDER BY 1 DESC"
-    )]
+    """Date range + types present in the library — feeds the filter chip menu."""
+    row = _db_fetchone(
+        "SELECT MIN(start_time::DATE), MAX(start_time::DATE) "
+        "FROM activities WHERE start_time IS NOT NULL"
+    )
+    min_date = row[0].isoformat() if row and row[0] else None
+    max_date = row[1].isoformat() if row and row[1] else None
     types = [t for (t,) in _db_fetchall(
         "SELECT DISTINCT type FROM activities WHERE type IS NOT NULL ORDER BY 1"
     )]
-    return {"years": years, "types": types}
+    return {"min_date": min_date, "max_date": max_date, "types": types}
 
 
 # ---- Bulk ingest ----------------------------------------------------------
@@ -462,6 +513,7 @@ def _run_import_thread(root: Path) -> None:
     try:
         inserted, unreadable = ingest_bulk.ingest(root, progress_cb=on_progress)
         _invalidate_caches()
+        _warm_default_aggregates()
         with _import_lock:
             _import_state.update({
                 "running": False, "phase": "done",
@@ -620,6 +672,7 @@ def _run_sync_thread(tokens: dict, since: int | None) -> None:
             tokens, since_epoch=since, on_wait=on_wait, on_progress=on_progress
         )
         _invalidate_caches()
+        _warm_default_aggregates()
         with _sync_lock:
             _sync_state.update({
                 "running": False, "phase": "done",
@@ -768,6 +821,7 @@ def strava_fix_types() -> dict:
                     updated += 1
             page += 1
     _invalidate_caches()
+    _warm_default_aggregates()
     return {"examined": examined, "updated": updated}
 
 

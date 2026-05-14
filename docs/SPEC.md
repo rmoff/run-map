@@ -47,7 +47,7 @@ Both paths use `INSERT … ON CONFLICT (id) DO UPDATE`, so a re-import / re-sync
 | Method | Path | Purpose |
 |---|---|---|
 | GET  | `/`                       | Static index.html |
-| GET  | `/aggregate.geojson`      | Single MultiLineString of every road/trail you've run — snap-to-grid (~33 m) + dedupe. The bearings/clickability layer. Filterable. Disk-cached, gzipped, `sendfile`-served. |
+| GET  | `/aggregate.geojson`      | Single MultiLineString of every road/trail you've run — snap-to-grid + dedupe. Three LODs via `?lod=low\|mid\|high` (~50 m / ~33 m / ~10 m), default `mid`. Filterable. Disk-cached per (lod, filter) combo, gzipped, `sendfile`-served. |
 | GET  | `/index.json`             | Per-activity samples + bbox + metadata. Feeds the hex overlay, view-fit, auto-match. Filterable. Disk-cached. |
 | GET  | `/heatmap.json`           | Densely-sampled lat/lng points (every ~30 m of real ground) for the heatmap overlay. Filterable. Disk-cached. |
 | GET  | `/match?lat=&lon=&r=`     | Activities whose track passes within `r` metres of (lat, lon). Includes simplified polyline geometry per match so the client can render the precise red track without holding the bulk track set. Filterable. |
@@ -69,7 +69,7 @@ Both paths use `INSERT … ON CONFLICT (id) DO UPDATE`, so a re-import / re-sync
 
 `/aggregate.geojson`, `/index.json`, `/heatmap.json`, `/match`, `/match/polygon` all accept the same attribute filters:
 
-- `years` — comma-separated list, e.g. `2024,2025`
+- `date_start`, `date_end` — ISO `YYYY-MM-DD`, inclusive on both ends; either can be omitted for an open-ended window. Bad input → 400.
 - `type` — `Run` (road) or `TrailRun`
 - `min_km`, `max_km` — distance window in km
 
@@ -82,11 +82,11 @@ DuckDB connections are **per-thread** (`threading.local`), since one connection 
 ### Layout
 
 - **Map** fills the viewport.
-- **Top-left** (Leaflet toolbar): zoom controls, the polygon-draw control, the ⟲ view-reset popover, and the 🗺 display-controls popover (base layer, base opacity, heatmap overlay).
-- **Top-centre**: filter chip bar — active year/type/distance chips with × to remove, plus a "+ Filter" button that opens the add-filter menu.
+- **Top-left** (Leaflet toolbar): zoom controls, the polygon-draw control, the ⟲ reset button (fly to most recent run), the 🗺 display-controls popover (base layer, base opacity, non-matched-track opacity, heatmap overlay), and the funnel button that opens the filter pane. Both popovers open on hover and close after a short grace period when the cursor leaves both the button and the popover.
+- **Below the toolbar (left rail)**: always-visible Road / Trail pills. Click to toggle; both off shows a small "(i) All tracks hidden" notice and removes the aggregate / hex / match layers.
+- **Top-centre**: filter chip bar — active date and distance chips with × to remove. Type is carried by the pills, so it gets no chip.
 - **Bottom-left**: brand pill (`run-map`) and ⚙ button. Settings drawer slides from the left and now holds only data/click-behaviour controls (search radius, lock-to-track, zoom-to-fit, Strava API, ZIP import, library stats).
-- **Top-right (right rail)**: Matches panel (capped at 50 vh) above, Strava-preview panel below. Both pinned with × to dismiss.
-- **Top centre toast**: e.g. "Showing runs from the last 90 days…" on first load.
+- **Top-right (right rail)**: Matches panel (capped at 50 vh) above, Strava-preview panel below. Both pinned with × to dismiss. On mobile (≤700 px) the rail spans top with a 56 px gutter on the left so the Leaflet toolbar stays reachable, and the preview's stats and photo become a two-page horizontal scroll-snap carousel with dot indicators.
 
 ### Boot data flow
 
@@ -99,10 +99,16 @@ Per-track geometry is never loaded in bulk. Match polylines arrive inline with `
 ### Layer stack
 
 - **z < 11**: H3 hex overlay coloured white→red by activity count per cell. Click a cell to fly-to-bounds of its tracks.
-- **z ≥ 11, idle**: aggregate layer (single blue GeoJSON, weight 2.5, opacity 0.85). Optional heatmap overlay (`leaflet.heat`, radius 18, blur 22) on top.
-- **z ≥ 11, after click/polygon**: aggregate dims (opacity 0.25) and matched tracks render as translucent red polylines (`STYLE_DENSITY`, weight 4.5, opacity 0.75). Overlapping segments darken naturally via alpha compositing.
+- **z ≥ 11, idle**: aggregate layer (single blue GeoJSON, weight 2.5, opacity 0.85), swapped between three LODs by zoom band:
+    - z 11–13: `low` (~50 m grid)
+    - z 14–15: `mid` (~33 m grid)
+    - z 16+: `high` (~10 m grid)
+  The client lazy-loads each band on first need; the `high` LOD is always loaded for snap-to-track lookups regardless of display zoom. Optional heatmap overlay (`leaflet.heat`, radius 18, blur 22) on top.
+- **z ≥ 11, after click/polygon/filter**: aggregate dims (configurable opacity, default 0.45) and matched tracks render as translucent red polylines (`STYLE_DENSITY`, weight 4.5, opacity 0.75). Overlapping segments darken naturally via alpha compositing.
 
-The heatmap is **automatically hidden while a match is active** (it's an exploratory overlay; once you've narrowed to specific runs the precise red lines carry the signal). Clearing the matches restores the heatmap if the toggle is on.
+Aggregate and match layers live in dedicated Leaflet panes (`aggPane` z-index 410, `matchPane` z-index 450) each backed by its own canvas renderer, so matched red lines always render above the aggregate regardless of LOD-swap order.
+
+The heatmap is **automatically hidden while a match is active**, and the toggle in the display popover is greyed out for the duration (it's an exploratory overlay; once you've narrowed to specific runs the precise red lines carry the signal). Clearing the matches re-enables and restores the heatmap if the toggle is on.
 
 ### Match interactions
 
@@ -112,19 +118,23 @@ The heatmap is **automatically hidden while a match is active** (it's an explora
 
 ### Filters & views
 
-- **View presets** (⟲ menu): *All data*, *Last 90 days* (default on first load), *Most traversed area*. These are **zoom-only criteria**, never data filters.
-- **Filter chips** (top-centre bar): year (multi-select), type (Run/TrailRun), distance min/max in km. Filters re-fetch every data endpoint (aggregate, heatmap, index, in-flight matches) and persist in the URL hash.
-- **Display popover** (🗺): base layer picker (default OpenTopoMap), base opacity slider (default 50 %), heatmap overlay toggle.
-- **Polygon / rectangle draw**: triggers `/match/polygon`, draws precise matched tracks, leaves the polygon outline with a red × close button at its NE corner.
-- **Settings drawer** (⚙): search radius (0 = auto / scales with zoom), lock-tap-to-nearest-track, zoom-to-fit-matches, Strava API config + sync, ZIP import, library stats.
+- **Default view + reset** (⟲ button): on boot (no URL view restored) and whenever ⟲ is clicked, the map flies to the bbox of the activity with the latest `start_time` (max-zoom 16). Reset also clears the visible match polylines, matches panel, and Strava embed, but preserves the click marker on the map and the in-memory match-list emphasis so a back-button or pin click can restore the selection.
+- **Type pills** (left rail under the funnel): Road and Trail. Click toggles; both on = no type filter, exactly one on = filter to that type, both off = aggregate / hex / matches all hidden with an "(i) All tracks hidden" notice. Pills are the single source of truth for type — there is no type chip.
+- **Filter pane** (funnel button, hover-to-open): three sections — Date (flatpickr range picker with presets: Last month / Last 6 months / Last 12 months, with a Clear-date link), Distance (histogram-backed dual-handle slider; upper handle at the max means open-ended), and an action row with `Clear all` plus two equal-weight buttons: `Filter all tracks` (the previous Apply — narrows the aggregate to this filter set) and `Show matches in view` (renders the filtered tracks that intersect the current viewport as red match polylines via `/match/polygon` with a bbox WKT). The second button is disabled until at least one facet is set, and on click it always clears the heatmap first, regardless of toggle state. While a filter-driven match set is active, toggling a Road/Trail pill (or any other facet) re-runs the match query so the visible set stays in sync.
+- **Display popover** (🗺, hover-to-open): base layer picker (Topo / OSM / Light / CyclOSM / Satellite, plus three Thunderforest styles when an API key is saved — `Thunderforest Outdoors` / `Landscape` / `OpenCycleMap`, key stored in `localStorage.runmap.tfApiKey`, saving a key snaps the active base layer to `Thunderforest Landscape`), base opacity slider (default 50 %), non-matched-track opacity slider (default 45 %; controls the dim alpha of the aggregate beneath active matches), heatmap overlay toggle.
+- **Polygon / rectangle draw**: triggers `/match/polygon`, draws precise matched tracks, flies to the bounds of the drawn shape (always, even when matches are inside), leaves the polygon outline with a red × close button at its NE corner.
+- **Settings drawer** (⚙): search radius (0 = auto / scales with zoom), lock-tap-to-nearest-track, zoom-to-fit-matches, Strava API config + sync, Thunderforest API key, ZIP import, library stats.
+- **Esc**: clears the active selection — drops any drawn rect/poly, clears the match set, and removes the click pin / radius circle.
 
 ### URL state
 
-The URL hash carries: zoom (`z`), centre (`ll`), preset, polygon WKT, lock-to-track toggle, zoom-to-fit, heatmap toggle (`hm`), base layer + opacity, search radius, **and the active filter chips** (`fyears`, `ftype`, `fmin`, `fmax`). Pan/zoom uses `replaceState`; intentional nav (preset change, filter change, polygon draw, hex drill-in, manual click) uses `pushState` so browser back works.
+The URL hash carries: zoom (`z`), centre (`ll`), polygon WKT (`poly`), lock-to-track toggle (`lock`), zoom-to-fit (`zfit`), heatmap toggle (`hm`), base layer (`base`), base opacity (`op`), search radius (`sr`), non-matched-track dim opacity (`dop`), the active filter chips (`fds`, `fde`, `ftype`, `fmin`, `fmax`), and the active click marker + emphasised match (`cll=lat,lng`, `mid=<id>`). Reload restores all of them — `applyURLState` calls `queryPoint(lat,lng)` and `currentEmphasise(mid)` after data loads, and `queryPoint` redraws the click pin + radius circle. The Thunderforest API key is **not** in the URL (it's a secret; localStorage only). Pan/zoom uses `replaceState`; intentional nav (filter change, polygon draw, hex drill-in, manual click, ⟲ reset) uses `pushState` so browser back works. Legacy hashes carrying `preset` or `fyears` are silently ignored.
 
 ### Performance
 
 - Boot blobs are gzipped and disk-cached at `data/cache/<sig>.json.gz`. The handler returns `FileResponse(..., Content-Encoding: gzip)` so Starlette uses `sendfile` and Python never touches the bytes after the first build. **Cached request: ~7 ms vs ~4 s cold** on a 1700-run library.
+- Aggregate LODs are pre-built at ingest end (`_warm_default_aggregates()` after `_invalidate_caches()`), so the three no-filter variants are always warm post-import / post-sync. Filtered LOD combos remain lazy.
+- Snap-to-track always uses the `high` LOD client-side so click precision doesn't degrade at lower zooms.
 - Aggregate sizing on a typical library: ~110 k unique segments, ~800 KB gzipped. Heatmap: ~70 k points, ~1 MB gzipped.
 - Match polylines arrive inline with `/match*` responses (simplified via `ST_Simplify` at ~1 m tolerance) — typically <50 tracks, kilobytes-scale.
 - Hex bins computed once per H3 resolution and cached on the client.

@@ -3,6 +3,17 @@
 const map = L.map('map', {
   preferCanvas: true,           // canvas renderer = sharper many-track rendering
 }).setView([54, -2], 6);
+// Dedicated panes so matched tracks always render above the aggregate layer,
+// regardless of layer-add order (aggregate LOD swaps re-add the layer, which
+// would otherwise stack on top of earlier-added matches).
+map.createPane('aggPane');
+map.getPane('aggPane').style.zIndex = 410;
+map.createPane('matchPane');
+map.getPane('matchPane').style.zIndex = 450;
+// Each pane needs its own canvas renderer; sharing one canvas across panes
+// breaks the layering since canvas draw order trumps z-index.
+const aggRenderer = L.canvas({ pane: 'aggPane' });
+const matchRenderer = L.canvas({ pane: 'matchPane' });
 // Inspection API for the Playwright smoke tests. Read-only — tests assert on
 // layer presence and match counts without poking module-local variables.
 window.__rm = {
@@ -10,10 +21,29 @@ window.__rm = {
   matchCount: () => matchLayersById.size,
   heatmapOn: () => !!heatmapLayer && map.hasLayer(heatmapLayer),
   hexOn: () => !!hexLayer && map.hasLayer(hexLayer),
-  aggregateOn: () => !!aggregateLayer && map.hasLayer(aggregateLayer),
+  aggregateOn: () => !!activeAggLod && !!aggregateLayers[activeAggLod] && map.hasLayer(aggregateLayers[activeAggLod]),
+  aggregateLod: () => activeAggLod,
+  snapSegmentsLoaded: () => aggregateSegments.length,
+  get indexById() { return indexById; },
 };
 
 const _osmAttr = '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>';
+const _tfAttr = `Maps &copy; <a href="https://www.thunderforest.com">Thunderforest</a>, data ${_osmAttr}`;
+const TF_KEY_STORAGE = 'runmap.tfApiKey';
+function _tfKey() { return localStorage.getItem(TF_KEY_STORAGE) || ''; }
+// Display name → Thunderforest style slug. Each requires a personal apikey
+// (see https://manage.thunderforest.com/users/sign_up?price=hobby-project-usd).
+const TF_STYLES = {
+  'Thunderforest Outdoors': 'outdoors',
+  'Thunderforest Landscape': 'landscape',
+  'Thunderforest OpenCycleMap': 'cycle',
+};
+function _buildTFLayer(style) {
+  return L.tileLayer(
+    'https://{s}.tile.thunderforest.com/' + style + '/{z}/{x}/{y}.png?apikey={apikey}',
+    { attribution: _tfAttr, maxZoom: 22, apikey: _tfKey() }
+  );
+}
 const baseLayers = {
   'Topo (OpenTopoMap)': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
     attribution: `${_osmAttr}, &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)`,
@@ -36,6 +66,35 @@ const baseLayers = {
     maxZoom: 19,
   }),
 };
+for (const [name, style] of Object.entries(TF_STYLES)) {
+  baseLayers[name] = _buildTFLayer(style);
+}
+function _isTFName(name) { return Object.prototype.hasOwnProperty.call(TF_STYLES, name); }
+function _activeBaseLayerName() {
+  for (const [name, layer] of Object.entries(baseLayers)) {
+    if (layer === activeBaseLayer) return name;
+  }
+  return null;
+}
+// Rebuild TF layers when the apikey changes so the new key takes effect
+// immediately, including for the currently-active layer.
+function rebuildTFLayers() {
+  const activeName = _activeBaseLayerName();
+  for (const [name, style] of Object.entries(TF_STYLES)) {
+    const old = baseLayers[name];
+    const fresh = _buildTFLayer(style);
+    baseLayers[name] = fresh;
+    if (old === activeBaseLayer) {
+      const op = parseFloat(document.getElementById('base-opacity').value) / 100;
+      map.removeLayer(old);
+      activeBaseLayer = fresh;
+      fresh.setOpacity(op);
+      fresh.addTo(map);
+    }
+  }
+  // _activeBaseLayerName guard above ensures we re-point the active reference.
+  if (activeName && _isTFName(activeName)) activeBaseLayer = baseLayers[activeName];
+}
 let activeBaseLayer = baseLayers['Topo (OpenTopoMap)'];
 activeBaseLayer.setOpacity(0.5);
 activeBaseLayer.addTo(map);
@@ -43,6 +102,13 @@ activeBaseLayer.addTo(map);
 function setBaseLayer(name) {
   const next = baseLayers[name];
   if (!next || next === activeBaseLayer) return;
+  if (_isTFName(name) && !_tfKey()) {
+    showToast('Thunderforest needs an API key — add it in Settings.');
+    const sel = document.getElementById('base-layer');
+    const current = _activeBaseLayerName();
+    if (sel && current) sel.value = current;
+    return;
+  }
   map.removeLayer(activeBaseLayer);
   activeBaseLayer = next;
   const opacity = parseFloat(document.getElementById('base-opacity').value) / 100;
@@ -78,7 +144,7 @@ function makeMenuControl(label, title, menuId, fontSize = '18px') {
         menu.style.top = `${rect.bottom + 6}px`;
         menu.style.left = `${rect.left}px`;
         // Close any other open map-anchored menu.
-        for (const id of ['view-menu', 'display-menu']) {
+        for (const id of ['display-menu']) {
           if (id !== menuId) document.getElementById(id).classList.add('hidden');
         }
         menu.classList.toggle('hidden');
@@ -88,26 +154,137 @@ function makeMenuControl(label, title, menuId, fontSize = '18px') {
   });
 }
 
-map.addControl(new (makeMenuControl('⟲', 'View / reset', 'view-menu'))());
-map.addControl(new (makeMenuControl('🗺', 'Display', 'display-menu', '16px'))());
+// Single-action ⟲ button: fly to the most recent run.
+const ResetControl = L.Control.extend({
+  options: { position: 'topleft' },
+  onAdd() {
+    const div = L.DomUtil.create('div', 'leaflet-bar leaflet-control');
+    const a = L.DomUtil.create('a', '', div);
+    a.href = '#'; a.title = 'Fly to most recent run'; a.textContent = '⟲';
+    a.style.fontSize = '18px';
+    a.style.lineHeight = '26px';
+    a.style.textAlign = 'center';
+    L.DomEvent.on(a, 'click', e => {
+      L.DomEvent.preventDefault(e);
+      resetToLastRun();
+    });
+    return div;
+  },
+});
+map.addControl(new ResetControl());
+const DisplayMenuCtl = makeMenuControl('🗺', 'Display', 'display-menu', '16px');
+const displayCtl = new DisplayMenuCtl();
+map.addControl(displayCtl);
 
-// Close map-anchored menus when clicking outside.
+// Hover-to-open for the 🗺 popover: open on pointer-enter over the button,
+// stay open while the cursor is over either the button or the menu, close on
+// exit from both. Falls back to click as a toggle on touch devices.
+(function _wireDisplayHover() {
+  const menu = document.getElementById('display-menu');
+  const btnLink = displayCtl.getContainer().querySelector('a');
+  if (!menu || !btnLink) return;
+  let closeTimer = null;
+  function open() {
+    clearTimeout(closeTimer);
+    const rect = btnLink.getBoundingClientRect();
+    menu.style.top = `${rect.bottom + 6}px`;
+    menu.style.left = `${rect.left}px`;
+    menu.classList.remove('hidden');
+  }
+  function scheduleClose() {
+    clearTimeout(closeTimer);
+    closeTimer = setTimeout(() => menu.classList.add('hidden'), 180);
+  }
+  btnLink.addEventListener('pointerenter', e => { if (e.pointerType === 'mouse') open(); });
+  btnLink.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') scheduleClose(); });
+  menu.addEventListener('pointerenter', () => clearTimeout(closeTimer));
+  menu.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') scheduleClose(); });
+})();
+
+// Funnel button — opens the filter pane (formerly anchored on the top-center
+// "+ Filter" chip).
+const FilterControl = L.Control.extend({
+  options: { position: 'topleft' },
+  onAdd() {
+    const div = L.DomUtil.create('div', 'leaflet-bar leaflet-control');
+    const a = L.DomUtil.create('a', '', div);
+    a.href = '#'; a.title = 'Filter'; a.id = 'filter-control-btn';
+    a.style.lineHeight = '26px'; a.style.textAlign = 'center';
+    a.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" style="vertical-align:middle"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" d="M3 5h18l-7 9v6l-4-2v-4z"/></svg>';
+    L.DomEvent.on(a, 'click', e => {
+      L.DomEvent.preventDefault(e);
+      L.DomEvent.stopPropagation(e);
+      toggleFilterMenu(a);
+    });
+    return div;
+  },
+});
+const _filterCtl = new FilterControl();
+map.addControl(_filterCtl);
+
+// Hover-to-open for the filter funnel: mirrors the 🗺 display popover.
+// While the pointer is over the button or the popover, the pane stays open;
+// it closes after a short grace period when both are exited. Type pills are
+// included as a "stay open" zone since they live right next to the menu.
+(function _wireFilterHover() {
+  const menu = document.getElementById('filter-menu');
+  const btnLink = _filterCtl.getContainer().querySelector('a');
+  if (!menu || !btnLink) return;
+  let closeTimer = null;
+  function open() {
+    clearTimeout(closeTimer);
+    if (menu.classList.contains('hidden')) toggleFilterMenu(btnLink);
+  }
+  function scheduleClose() {
+    clearTimeout(closeTimer);
+    closeTimer = setTimeout(() => {
+      // Don't yank the pane shut if the user is mid-interaction with the
+      // date picker — flatpickr's calendar lives in document.body.
+      if (document.querySelector('.flatpickr-calendar.open')) return;
+      if (!menu.classList.contains('hidden')) toggleFilterMenu(btnLink);
+    }, 240);
+  }
+  btnLink.addEventListener('pointerenter', e => { if (e.pointerType === 'mouse') open(); });
+  btnLink.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') scheduleClose(); });
+  menu.addEventListener('pointerenter', () => clearTimeout(closeTimer));
+  menu.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') scheduleClose(); });
+})();
+
+// Close map-anchored menus when clicking outside. Use the capture phase so
+// we evaluate `e.target.closest('.flatpickr-calendar')` BEFORE flatpickr's
+// own click handler detaches the clicked element during re-render.
 document.addEventListener('click', e => {
-  for (const id of ['view-menu', 'display-menu', 'filter-menu']) {
+  for (const id of ['display-menu', 'filter-menu']) {
     const menu = document.getElementById(id);
     if (menu.classList.contains('hidden')) continue;
     if (e.target.closest(`#${id}`)) continue;
     if (e.target.closest('.leaflet-control')) continue;
-    if (id === 'filter-menu' && e.target.closest('#add-filter')) continue;
+    // Flatpickr renders its calendar in document.body; while the picker is
+    // open, any stray click (target inside the calendar, or quirky targets
+    // like BODY when the picker swallows propagation) must not collapse the
+    // host filter pane — there'd be no way to land on Apply.
+    if (id === 'filter-menu' && (
+          e.target.closest('.flatpickr-calendar') ||
+          document.querySelector('.flatpickr-calendar.open') ||
+          e.target.closest('#filter-bar') ||
+          e.target.closest('#type-pills')
+        )) continue;
     menu.classList.add('hidden');
+    if (id === 'filter-menu') document.body.classList.remove('filter-menu-open');
   }
-});
+}, true);
 
 // Path styling.
 // The aggregate layer is one big GeoJSON of every road/trail you've run —
 // a "street map of your runs". Single blue line, no per-track casing.
 const STYLE_AGG = { color: '#1a5a8a', weight: 2.5, opacity: 0.85 };
-const STYLE_AGG_DIM = { color: '#1a5a8a', weight: 1.8, opacity: 0.25 };
+const STYLE_AGG_DIM_DEFAULT = 0.45;
+const STYLE_AGG_DIM_WEIGHT = 2.0;
+function _styleAggDim() {
+  const el = document.getElementById('dim-opacity');
+  const op = el ? Number(el.value) / 100 : STYLE_AGG_DIM_DEFAULT;
+  return { color: '#1a5a8a', weight: STYLE_AGG_DIM_WEIGHT, opacity: op };
+}
 // Match polylines — precise track geometry returned by /match*, drawn on top
 // of the aggregate when a click/polygon selects runs.
 const STYLE_MATCH_CASING = { color: '#ffffff', weight: 7, opacity: 0.9 };
@@ -121,8 +298,25 @@ const STYLE_DENSITY       = { color: '#d62728', weight: 4.5, opacity: 0.75 };
 // When ONE match is emphasised, the others fade further to let the glow lead.
 const STYLE_DENSITY_FADED = { color: '#d62728', weight: 3,   opacity: 0.18 };
 
-let aggregateLayer = null;          // L.geoJSON drawn at z >= HEX_ZOOM_THRESHOLD
-let aggregateSegments = [];         // [[lat,lng],[lat,lng]] pairs, for snap-to-track
+// Aggregate layers, one L.geoJSON per LOD. Server pre-builds the three
+// no-filter variants at ingest, so first paint of any zoom band is warm.
+// `aggregateLayers[lod]` is null until the band is first needed; lazy-load
+// keyed by current zoom keeps boot to one fetch (the current band) plus
+// one fire-and-forget fetch for `high` (used for snap-to-track).
+const AGG_LOD_BANDS = [
+  { max: 13, lod: 'low'  },  // z 11–13: ~50 m grid
+  { max: 15, lod: 'mid'  },  // z 14–15: ~33 m grid (historic default)
+  { max: 99, lod: 'high' },  // z 16+:   ~10 m grid
+];
+const AGG_SNAP_LOD = 'high'; // always snap with the finest LOD, regardless of zoom
+function lodForZoom(z) {
+  for (const b of AGG_LOD_BANDS) if (z <= b.max) return b.lod;
+  return AGG_LOD_BANDS[AGG_LOD_BANDS.length - 1].lod;
+}
+let aggregateLayers = { low: null, mid: null, high: null };
+let aggregateLoads = { low: null, mid: null, high: null };  // in-flight promises
+let activeAggLod = null;            // lod currently `addTo(map)`'d, or null
+let aggregateSegments = [];         // [[lat,lng],[lat,lng]] pairs (from AGG_SNAP_LOD), for snap-to-track
 let indexById = new Map();          // id -> { samples, bbox, type, start_time, distance_m }
 let matchLayersById = new Map();    // id -> L.polyline (built per-match render)
 let matchCasingsById = new Map();   // id -> L.polyline (white halo)
@@ -140,14 +334,14 @@ let hexCellToActivityIds = new Map();// resolution -> Map<cell, Set<activityId>>
 const HEX_ZOOM_THRESHOLD = 11;
 
 // Active filtering
-let currentPreset = 'recent90'; // 'all' | 'recent90' | 'dense' — default to recent
 let polygonFilter = null;       // WKT POLYGON, or null
 let polygonBounds = null;       // L.latLngBounds of the drawn shape
 let prePinView = null;          // map view saved when a track is pinned
 
-// Attribute filters (set by the chip bar). Empty means "no filter".
+// Attribute filters (set by the chip bar). Empty/null means "no filter".
 let activeFilters = {
-  years: [],         // [2024, 2025]
+  date_start: null,  // ISO 'YYYY-MM-DD' or null
+  date_end: null,    // ISO 'YYYY-MM-DD' or null
   type: null,        // 'Run' | 'TrailRun' | null
   min_km: null,      // numbers; null = no bound
   max_km: null,
@@ -155,7 +349,8 @@ let activeFilters = {
 
 function filterQueryString() {
   const p = new URLSearchParams();
-  if (activeFilters.years.length) p.set('years', activeFilters.years.join(','));
+  if (activeFilters.date_start) p.set('date_start', activeFilters.date_start);
+  if (activeFilters.date_end) p.set('date_end', activeFilters.date_end);
   if (activeFilters.type) p.set('type', activeFilters.type);
   if (activeFilters.min_km != null) p.set('min_km', activeFilters.min_km);
   if (activeFilters.max_km != null) p.set('max_km', activeFilters.max_km);
@@ -163,7 +358,7 @@ function filterQueryString() {
 }
 
 function hasActiveFilters() {
-  return !!(activeFilters.years.length || activeFilters.type
+  return !!(activeFilters.date_start || activeFilters.date_end || activeFilters.type
             || activeFilters.min_km != null || activeFilters.max_km != null);
 }
 
@@ -176,9 +371,9 @@ function _currentHash() {
   const p = new URLSearchParams();
   p.set('z', map.getZoom().toString());
   p.set('ll', `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`);
-  if (currentPreset !== 'all') p.set('preset', currentPreset);
   if (polygonFilter) p.set('poly', polygonFilter);
-  if (activeFilters.years.length) p.set('fyears', activeFilters.years.join(','));
+  if (activeFilters.date_start) p.set('fds', activeFilters.date_start);
+  if (activeFilters.date_end) p.set('fde', activeFilters.date_end);
   if (activeFilters.type) p.set('ftype', activeFilters.type);
   if (activeFilters.min_km != null) p.set('fmin', activeFilters.min_km);
   if (activeFilters.max_km != null) p.set('fmax', activeFilters.max_km);
@@ -196,6 +391,12 @@ function _currentHash() {
   if (opacity && opacity.value !== '50') p.set('op', opacity.value);
   const sr = document.getElementById('search-radius');
   if (sr && sr.value !== '0') p.set('sr', sr.value);
+  const dim = document.getElementById('dim-opacity');
+  if (dim && dim.value !== '45') p.set('dop', dim.value);
+  // Persist the active click marker + match-list emphasis so reload restores
+  // the user's last interaction (matches + pin + highlighted row).
+  if (lastClickLatLng) p.set('cll', `${lastClickLatLng.lat.toFixed(5)},${lastClickLatLng.lng.toFixed(5)}`);
+  if (emphasisedId != null) p.set('mid', String(emphasisedId));
   return '#' + p.toString();
 }
 
@@ -222,18 +423,24 @@ function loadSavedState() {
   return {
     zoom: p.get('z') ? parseInt(p.get('z'), 10) : null,
     center: (ll && ll.length === 2 && !ll.some(isNaN)) ? ll : null,
-    preset: p.get('preset') || 'all',
     polygonFilter: p.get('poly') || null,
     lockToTrack: p.get('lock') !== '0',
     zoomToFit: p.get('zfit') === '1',
     heatmap: p.get('hm') === '1',
-    filterYears: p.get('fyears') ? p.get('fyears').split(',').map(Number).filter(n => !isNaN(n)) : [],
+    filterDateStart: p.get('fds') || null,
+    filterDateEnd: p.get('fde') || null,
     filterType: p.get('ftype') || null,
     filterMinKm: p.get('fmin') ? Number(p.get('fmin')) : null,
     filterMaxKm: p.get('fmax') ? Number(p.get('fmax')) : null,
     baseLayer: p.get('base') || 'Topo (OpenTopoMap)',
     baseOpacity: p.get('op') ? parseInt(p.get('op'), 10) : 50,
     searchRadius: p.get('sr') ? parseInt(p.get('sr'), 10) : 0,
+    dimOpacity: p.get('dop') ? parseInt(p.get('dop'), 10) : 45,
+    clickLatLng: (() => {
+      const v = p.get('cll')?.split(',').map(Number);
+      return (v && v.length === 2 && !v.some(isNaN)) ? v : null;
+    })(),
+    matchId: p.get('mid') ? Number(p.get('mid')) : null,
   };
 }
 let clickMarker = null;
@@ -287,25 +494,57 @@ async function clearPolygonFilter() {
   saveState();
 }
 
-async function applyPreset(name) {
-  pushHistoryCheckpoint();
-  currentPreset = name;
-  document.getElementById('view-menu').classList.add('hidden');
-  autoMatchSuppressed = false;
-  await loadData();
-  fitView();
-  applyZoomMode();
-  saveState();
-  if (name === 'recent90') {
-    showToast('Showing runs from the last 90 days. Use the ⟲ menu to change.');
-  } else {
-    hideToast();
+// Find the activity with the most recent start_time. Returns null when the
+// index is empty or no row has a parseable timestamp.
+function _mostRecentActivity() {
+  let best = null;
+  let bestTs = -Infinity;
+  for (const a of indexById.values()) {
+    const t = a.start_time ? new Date(a.start_time).getTime() : NaN;
+    if (!Number.isFinite(t)) continue;
+    if (t > bestTs) { bestTs = t; best = a; }
   }
+  return best;
 }
 
-document.querySelectorAll('#view-menu button').forEach(btn => {
-  btn.onclick = () => applyPreset(btn.dataset.view);
-});
+function _bboxToBounds(a) {
+  // bbox is [minlon, minlat, maxlon, maxlat]
+  return [[a.bbox[1], a.bbox[0]], [a.bbox[3], a.bbox[2]]];
+}
+
+function flyToLastRun() {
+  const a = _mostRecentActivity();
+  if (!a) return false;
+  map.fitBounds(_bboxToBounds(a), { padding: [30, 30], maxZoom: 16 });
+  return true;
+}
+
+async function resetToLastRun() {
+  pushHistoryCheckpoint();
+  autoMatchSuppressed = false;
+  // Clear the *visible* match UI: red polylines, matches list, Strava embed.
+  // Preserve the click location pin and the in-memory match list selection
+  // (`emphasisedId`) — the user explicitly asked for these to survive a reset
+  // so they can be restored.
+  const savedEmphasised = emphasisedId;
+  clearMatchLayers();
+  document.getElementById('matches-panel').classList.add('hidden');
+  document.getElementById('matches-content').innerHTML = '';
+  matchesPanelOpen = false;
+  hidePreview();
+  lastMatches = [];     // un-block heatmap + visually consistent with the cleared layers
+  // Aggregate returns to full prominence; heatmap allowed back.
+  if (activeAggLod && aggregateLayers[activeAggLod] && map.hasLayer(aggregateLayers[activeAggLod])) {
+    aggregateLayers[activeAggLod].setStyle(STYLE_AGG);
+  }
+  heatmapClickSuppressed = false;
+  applyHeatmapVisibility();
+  _syncHeatmapToggleEnabled();
+  emphasisedId = savedEmphasised;   // restored after hideMatchesPanel would've nulled it
+  flyToLastRun();
+  applyZoomMode();
+  saveState();
+}
 
 // ---- Auto match radius (scales with zoom) --------------------------------
 
@@ -373,73 +612,62 @@ async function loadIndex() {
   return true;
 }
 
-async function loadAggregate() {
-  if (aggregateLayer) { map.removeLayer(aggregateLayer); aggregateLayer = null; }
+function _clearAggregateLayers() {
+  for (const lod of Object.keys(aggregateLayers)) {
+    const layer = aggregateLayers[lod];
+    if (layer && map.hasLayer(layer)) map.removeLayer(layer);
+    aggregateLayers[lod] = null;
+    aggregateLoads[lod] = null;
+  }
+  activeAggLod = null;
   aggregateSegments = [];
+}
+
+// Fetch + parse one LOD. Builds the L.geoJSON layer and, for AGG_SNAP_LOD,
+// populates aggregateSegments. Idempotent: a second call with the same lod
+// awaits the in-flight promise instead of refetching.
+function ensureAggLod(lod) {
+  if (aggregateLayers[lod]) return Promise.resolve(aggregateLayers[lod]);
+  if (aggregateLoads[lod]) return aggregateLoads[lod];
   const qs = filterQueryString();
-  const r = await fetch(`/aggregate.geojson${qs ? `?${qs}` : ''}`);
-  if (!r.ok) return false;
-  const gj = await r.json();
-  const feat = gj.features?.[0];
-  if (!feat || !feat.geometry) return false;
-  const coords = feat.geometry.coordinates || [];
-  // Store [[lat,lng],[lat,lng]] pairs for snap-to-track lookups.
-  for (const seg of coords) {
-    if (seg.length >= 2) {
-      aggregateSegments.push([[seg[0][1], seg[0][0]], [seg[1][1], seg[1][0]]]);
+  const url = `/aggregate.geojson?lod=${lod}${qs ? `&${qs}` : ''}`;
+  const p = (async () => {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const gj = await r.json();
+    const feat = gj.features?.[0];
+    if (!feat || !feat.geometry) return null;
+    if (lod === AGG_SNAP_LOD) {
+      const coords = feat.geometry.coordinates || [];
+      const segs = [];
+      for (const seg of coords) {
+        if (seg.length >= 2) {
+          segs.push([[seg[0][1], seg[0][0]], [seg[1][1], seg[1][0]]]);
+        }
+      }
+      aggregateSegments = segs;
     }
-  }
-  aggregateLayer = L.geoJSON(gj, { style: () => STYLE_AGG, interactive: false });
-  // The aggregate is only shown at z >= HEX_ZOOM_THRESHOLD; applyZoomMode
-  // decides whether to add it to the map.
-  return true;
+    const layer = L.geoJSON(gj, { style: () => STYLE_AGG, interactive: false, renderer: aggRenderer, pane: 'aggPane' });
+    aggregateLayers[lod] = layer;
+    return layer;
+  })();
+  aggregateLoads[lod] = p;
+  return p;
 }
 
-function percentile(sorted, p) {
-  const k = (sorted.length - 1) * p;
-  const lo = Math.floor(k), hi = Math.min(lo + 1, sorted.length - 1);
-  return sorted[lo] + (sorted[hi] - sorted[lo]) * (k - lo);
+async function loadAggregate() {
+  _clearAggregateLayers();
+  // Load the LOD for the current zoom (for display) and the snap LOD (for
+  // click-to-track). When the user is already zoomed into the snap band these
+  // collapse into one fetch.
+  const current = lodForZoom(map.getZoom());
+  const tasks = [ensureAggLod(current)];
+  if (current !== AGG_SNAP_LOD) tasks.push(ensureAggLod(AGG_SNAP_LOD));
+  await Promise.all(tasks);
+  // applyZoomMode decides whether to attach (depends on hex/match state).
+  return !!aggregateLayers[current];
 }
 
-function _activityCentroid(a) {
-  // bbox is [minlon, minlat, maxlon, maxlat]
-  return { lon: (a.bbox[0] + a.bbox[2]) / 2, lat: (a.bbox[1] + a.bbox[3]) / 2,
-           time: a.start_time ? new Date(a.start_time).getTime() : null };
-}
-
-function fitView() {
-  if (!indexById.size) return;
-  const all = [];
-  for (const a of indexById.values()) all.push(_activityCentroid(a));
-
-  let subset = all;
-  if (currentPreset === 'recent90') {
-    const cutoff = Date.now() - 90 * 24 * 3600 * 1000;
-    const recent = all.filter(c => c.time != null && c.time >= cutoff);
-    if (recent.length >= 1) subset = recent;
-  } else if (currentPreset === 'dense') {
-    const lats = all.map(c => c.lat).sort((a, b) => a - b);
-    const lons = all.map(c => c.lon).sort((a, b) => a - b);
-    const q1Lat = percentile(lats, 0.25), q3Lat = percentile(lats, 0.75);
-    const q1Lon = percentile(lons, 0.25), q3Lon = percentile(lons, 0.75);
-    const iqrLat = q3Lat - q1Lat;
-    const iqrLon = q3Lon - q1Lon;
-    const loLat = q1Lat - 1.5 * iqrLat, hiLat = q3Lat + 1.5 * iqrLat;
-    const loLon = q1Lon - 1.5 * iqrLon, hiLon = q3Lon + 1.5 * iqrLon;
-    const inliers = all.filter(c =>
-      c.lat >= loLat && c.lat <= hiLat && c.lon >= loLon && c.lon <= hiLon
-    );
-    if (inliers.length >= 2) subset = inliers;
-  }
-
-  const lats = subset.map(c => c.lat);
-  const lons = subset.map(c => c.lon);
-  const bounds = [
-    [Math.min(...lats), Math.min(...lons)],
-    [Math.max(...lats), Math.max(...lons)],
-  ];
-  map.fitBounds(bounds, { padding: [30, 30] });
-}
 
 // ---- Hex (low-zoom) overlay ---------------------------------------------
 
@@ -536,9 +764,10 @@ function renderHexes() {
       layer.on('click', e => {
         L.DomEvent.stopPropagation(e);
         pushHistoryCheckpoint();
-        const tBounds = boundsOfTracksInHex(res, feat.properties.cell);
-        const target = tBounds || layer.getBounds();
-        map.flyToBounds(target, {
+        // Zoom to the hex itself — using the tracks' bounding box surprised
+        // users when the contained tracks extend well beyond the hex outline
+        // (or when a long track's bbox dwarfs the cell).
+        map.flyToBounds(layer.getBounds(), {
           maxZoom: 16,
           padding: [40, 40],
           duration: 0.7,
@@ -548,15 +777,60 @@ function renderHexes() {
   }).addTo(map);
 }
 
+function _detachAggregate() {
+  if (activeAggLod && aggregateLayers[activeAggLod] && map.hasLayer(aggregateLayers[activeAggLod])) {
+    map.removeLayer(aggregateLayers[activeAggLod]);
+  }
+  activeAggLod = null;
+}
+
+function _currentAggStyle() {
+  // Dim when a match is active, otherwise the standard look.
+  return lastMatches && lastMatches.length ? _styleAggDim() : STYLE_AGG;
+}
+
+// Swap to the LOD for the current zoom. Lazy-loads if the band hasn't been
+// fetched yet; once the fetch resolves we re-check the current zoom so a
+// fast scroller doesn't end up showing a stale LOD.
+function _swapAggregateToZoom() {
+  const want = lodForZoom(map.getZoom());
+  if (activeAggLod === want && aggregateLayers[want]) return;
+  const layer = aggregateLayers[want];
+  if (layer) {
+    if (activeAggLod && activeAggLod !== want) {
+      const prev = aggregateLayers[activeAggLod];
+      if (prev && map.hasLayer(prev)) map.removeLayer(prev);
+    }
+    layer.setStyle(_currentAggStyle());
+    if (!map.hasLayer(layer)) layer.addTo(map);
+    activeAggLod = want;
+    return;
+  }
+  ensureAggLod(want).then(l => {
+    if (!l) return;
+    // Re-check: user may have zoomed again while the fetch was in flight.
+    if (lodForZoom(map.getZoom()) !== want) return;
+    // Hex mode may have taken over too.
+    if (map.getZoom() < HEX_ZOOM_THRESHOLD && window.h3) return;
+    if (activeAggLod && activeAggLod !== want) {
+      const prev = aggregateLayers[activeAggLod];
+      if (prev && map.hasLayer(prev)) map.removeLayer(prev);
+    }
+    l.setStyle(_currentAggStyle());
+    if (!map.hasLayer(l)) l.addTo(map);
+    activeAggLod = want;
+  });
+}
+
 function applyZoomMode() {
   // If h3-js failed to load, never go into hex mode — just show aggregate.
   const useTracks = map.getZoom() >= HEX_ZOOM_THRESHOLD || !window.h3;
   if (useTracks) {
     if (hexLayer) { map.removeLayer(hexLayer); hexLayer = null; }
-    if (aggregateLayer && !map.hasLayer(aggregateLayer)) aggregateLayer.addTo(map);
+    _swapAggregateToZoom();
     applyHeatmapVisibility();
   } else {
-    if (aggregateLayer && map.hasLayer(aggregateLayer)) map.removeLayer(aggregateLayer);
+    _detachAggregate();
     if (heatmapLayer && map.hasLayer(heatmapLayer)) map.removeLayer(heatmapLayer);
     renderHexes();
     // Hex view is for density only — track-level interactions don't apply.
@@ -578,7 +852,14 @@ async function queryPoint(lat, lon) {
   const matches = await r.json();
   lastClickLatLng = L.latLng(lat, lon);
   lastMatches = matches;
+  // Ensure the click pin + radius circle reflect the (lat,lon) we just queried —
+  // important on URL-state restore where no click event drew them.
+  if (!clickMarker || !clickMarker.getLatLng().equals(lastClickLatLng)) {
+    drawClickGraphics(lastClickLatLng, currentRadiusMetres());
+  }
   renderMatches(matches, lastClickLatLng);
+  // Persist the click marker + match selection so reload restores them.
+  saveState();
 }
 
 async function queryPolygon(wkt) {
@@ -602,8 +883,8 @@ function buildMatchLayers(matches) {
   for (const m of matches) {
     if (!m.geometry || m.geometry.length < 2) continue;
     matchGeomById.set(m.id, m.geometry);
-    const casing = L.polyline(m.geometry, STYLE_DENSITY_CASING);
-    const line = L.polyline(m.geometry, STYLE_DENSITY);
+    const casing = L.polyline(m.geometry, { ...STYLE_DENSITY_CASING, renderer: matchRenderer, pane: 'matchPane' });
+    const line = L.polyline(m.geometry, { ...STYLE_DENSITY, renderer: matchRenderer, pane: 'matchPane' });
     line.on('mouseover', () => { map.getContainer().style.cursor = 'pointer'; });
     line.on('mouseout',  () => { map.getContainer().style.cursor = ''; });
     matchCasingsById.set(m.id, casing);
@@ -661,10 +942,13 @@ function renderMatches(matches, atLatLng, { fit = true } = {}) {
   buildMatchLayers(matches);
   applyMatchViewMode(matches);
   // Aggregate dims behind active matches so the red lines stand out.
-  if (aggregateLayer && map.hasLayer(aggregateLayer)) aggregateLayer.setStyle(STYLE_AGG_DIM);
+  if (activeAggLod && aggregateLayers[activeAggLod] && map.hasLayer(aggregateLayers[activeAggLod])) {
+    aggregateLayers[activeAggLod].setStyle(_styleAggDim());
+  }
   // Heatmap is exploratory — hide it while the user is looking at a match.
   heatmapClickSuppressed = true;
   applyHeatmapVisibility();
+  _syncHeatmapToggleEnabled();
 
   if (!matches.length) {
     matchesPanelOpen = true;
@@ -784,13 +1068,28 @@ function clearMatches() {
   lastMatches = [];
   matchesBounds = null;
   prePinView = null;
+  _filteredMatchActive = false;
   clearMatchLayers();
   hidePreview();
   // Aggregate returns to full prominence once nothing is matched.
-  if (aggregateLayer && map.hasLayer(aggregateLayer)) aggregateLayer.setStyle(STYLE_AGG);
+  if (activeAggLod && aggregateLayers[activeAggLod] && map.hasLayer(aggregateLayers[activeAggLod])) {
+    aggregateLayers[activeAggLod].setStyle(STYLE_AGG);
+  }
   // Heatmap was hidden while match was active — restore if toggle is on.
   heatmapClickSuppressed = false;
   applyHeatmapVisibility();
+  _syncHeatmapToggleEnabled();
+}
+
+// Heatmap is mutually exclusive with active matches — grey the toggle out
+// (and its label) so the user gets visual feedback for why it's inert.
+function _syncHeatmapToggleEnabled() {
+  const cb = document.getElementById('heatmap-toggle');
+  if (!cb) return;
+  const blocked = !!(lastMatches && lastMatches.length);
+  cb.disabled = blocked;
+  const label = cb.closest('label');
+  if (label) label.classList.toggle('disabled', blocked);
 }
 
 // ---- Lock-to-track (snap click to nearest track) -------------------------
@@ -889,6 +1188,7 @@ function scheduleStravaPreview(id, { delay = 350 } = {}) {
       const data = await fetchActivity(id);
       if (previewActivityId !== id) return;
       content.innerHTML = renderPreview(data);
+      _wirePreviewSwipe();
     } catch (e) {
       if (previewActivityId !== id) return;
       content.innerHTML = `<p class="status error">Preview unavailable: ${escapeHTML(String(e.message || e))}</p>`;
@@ -976,21 +1276,48 @@ function renderPreview({ summary, streams }) {
   const kudos = summary.kudos_count ?? 0;
   const comments = summary.comment_count ?? 0;
 
+  // Two-page swipeable layout on mobile: page 1 is the details + elevation,
+  // page 2 is the photo. CSS scroll-snap drives the gesture; on desktop the
+  // pages just stack vertically. With no photo we skip the second page and
+  // the dots so the popup stays compact.
+  const detailsPage = `
+    <section class="preview-page details">
+      <a class="preview-link top" href="https://www.strava.com/activities/${summary.id}" target="_blank" rel="noopener">Open on Strava ↗</a>
+      <h3>${escapeHTML(summary.name || '(unnamed)')}</h3>
+      <p class="pdate">${escapeHTML(date)} · ${escapeHTML(summary.type || '')}</p>
+      <p class="social">👍 ${kudos} &nbsp;·&nbsp; 💬 ${comments}</p>
+      <table class="stats">
+        <tr><td>Distance</td><td>${km}</td></tr>
+        <tr><td>Moving time</td><td>${time}</td></tr>
+        <tr><td>Pace</td><td>${pace}</td></tr>
+        <tr><td>Elevation</td><td>${elev}</td></tr>
+        ${hr ? `<tr><td>Avg HR</td><td>${hr}</td></tr>` : ''}
+      </table>
+      ${renderElevationChart(streams)}
+    </section>`;
+  const photoPage = photo
+    ? `<section class="preview-page photo"><img class="preview-photo" src="${photo}" alt=""></section>`
+    : '';
+  const dots = photo
+    ? `<div class="preview-dots" aria-hidden="true"><span class="dot on"></span><span class="dot"></span></div>`
+    : '';
   return `
-    <a class="preview-link top" href="https://www.strava.com/activities/${summary.id}" target="_blank" rel="noopener">Open on Strava ↗</a>
-    <h3>${escapeHTML(summary.name || '(unnamed)')}</h3>
-    <p class="pdate">${escapeHTML(date)} · ${escapeHTML(summary.type || '')}</p>
-    <p class="social">👍 ${kudos} &nbsp;·&nbsp; 💬 ${comments}</p>
-    <table class="stats">
-      <tr><td>Distance</td><td>${km}</td></tr>
-      <tr><td>Moving time</td><td>${time}</td></tr>
-      <tr><td>Pace</td><td>${pace}</td></tr>
-      <tr><td>Elevation</td><td>${elev}</td></tr>
-      ${hr ? `<tr><td>Avg HR</td><td>${hr}</td></tr>` : ''}
-    </table>
-    ${renderElevationChart(streams)}
-    ${photo ? `<img class="preview-photo" src="${photo}" alt="">` : ''}
+    <div class="preview-pages">${detailsPage}${photoPage}</div>
+    ${dots}
   `;
+}
+
+// Mobile: update the active dot as the user swipes between pages.
+function _wirePreviewSwipe() {
+  const pages = document.querySelector('#preview-content .preview-pages');
+  const dots = document.querySelectorAll('#preview-content .preview-dots .dot');
+  if (!pages || dots.length < 2) return;
+  pages.addEventListener('scroll', () => {
+    const w = pages.clientWidth;
+    if (!w) return;
+    const i = Math.round(pages.scrollLeft / w);
+    dots.forEach((d, j) => d.classList.toggle('on', j === i));
+  }, { passive: true });
 }
 
 // ---- Map interaction -----------------------------------------------------
@@ -1007,8 +1334,21 @@ map.on('moveend', saveState);
 // Any setting change writes to the URL.
 const _persistedSettingIds = new Set([
   'lock-to-track', 'zoom-to-fit-matches', 'heatmap-toggle',
-  'base-layer', 'base-opacity', 'search-radius',
+  'base-layer', 'base-opacity', 'search-radius', 'dim-opacity',
 ]);
+
+// Live update of the aggregate dim style + label as the user drags the slider.
+const _dimOpacityInput = document.getElementById('dim-opacity');
+if (_dimOpacityInput) {
+  _dimOpacityInput.addEventListener('input', () => {
+    const lbl = document.getElementById('dim-opacity-label');
+    if (lbl) lbl.textContent = _dimOpacityInput.value;
+    if (lastMatches && lastMatches.length && activeAggLod
+        && aggregateLayers[activeAggLod] && map.hasLayer(aggregateLayers[activeAggLod])) {
+      aggregateLayers[activeAggLod].setStyle(_styleAggDim());
+    }
+  });
+}
 document.addEventListener('change', e => {
   if (e.target && _persistedSettingIds.has(e.target.id)) saveState();
 });
@@ -1086,6 +1426,40 @@ function clearClickGraphics() {
   if (clickRadiusCircle) { map.removeLayer(clickRadiusCircle); clickRadiusCircle = null; }
 }
 
+function drawClickGraphics(target, radiusM) {
+  clearClickGraphics();
+  clickRadiusCircle = L.circle(target, {
+    radius: radiusM,
+    color: '#0891b2', weight: 1.5, opacity: 0.85,
+    fillColor: '#0891b2', fillOpacity: 0.08,
+  }).addTo(map);
+  const pinHtml = `<svg viewBox="0 0 24 32" width="22" height="29" xmlns="http://www.w3.org/2000/svg">
+    <path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20c0-6.6-5.4-12-12-12z" fill="#0891b2" stroke="#fff" stroke-width="2"/>
+    <circle cx="12" cy="12" r="4" fill="#fff"/>
+  </svg>`;
+  clickMarker = L.marker(target, {
+    icon: L.divIcon({ html: pinHtml, className: 'click-pin', iconSize: [22, 29], iconAnchor: [11, 29] }),
+    interactive: false, keyboard: false, zIndexOffset: 800,
+  }).addTo(map);
+}
+
+// Esc clears the current selection: drops any drawn rect/poly + active
+// matches + click graphics. Skipped if focus is in a text input or a popover
+// has its own dismiss handling.
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  let acted = false;
+  if (polygonFilter || polygonBounds) { clearPolygonFilter(); acted = true; }
+  if (lastMatches && lastMatches.length) { clearMatches(); acted = true; }
+  if (clickMarker || clickRadiusCircle) { clearClickGraphics(); acted = true; }
+  if (acted) {
+    e.preventDefault();
+    saveState();
+  }
+});
+
 map.on('click', e => {
   if (isDrawing) return;
   // In hex (low-zoom) mode the hex feature's own click already handles drill-in;
@@ -1097,29 +1471,18 @@ map.on('click', e => {
   // An explicit user click counts as "engagement" — un-suppress auto-match.
   autoMatchSuppressed = false;
 
+  // A click-to-select supersedes any active rect/poly bounding-box filter —
+  // drop the shape so the user isn't left with stale highlight context.
+  if (polygonFilter || polygonBounds) clearPolygonFilter();
+
   let target = e.latlng;
   if (document.getElementById('lock-to-track').checked) {
     const snapped = snapToNearestTrack(e.latlng);
     if (snapped) target = snapped;
   }
 
-  const r = currentRadiusMetres();
-  clearClickGraphics();
-  clickRadiusCircle = L.circle(target, {
-    radius: r,
-    color: '#0891b2', weight: 1.5, opacity: 0.85,
-    fillColor: '#0891b2', fillOpacity: 0.08,
-  }).addTo(map);
-  // Pin-shaped marker so the search point stays visible at any zoom level
-  // (a circleMarker can disappear inside the radius circle when zoomed out).
-  const pinHtml = `<svg viewBox="0 0 24 32" width="22" height="29" xmlns="http://www.w3.org/2000/svg">
-    <path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20c0-6.6-5.4-12-12-12z" fill="#0891b2" stroke="#fff" stroke-width="2"/>
-    <circle cx="12" cy="12" r="4" fill="#fff"/>
-  </svg>`;
-  clickMarker = L.marker(target, {
-    icon: L.divIcon({ html: pinHtml, className: 'click-pin', iconSize: [22, 29], iconAnchor: [11, 29] }),
-    interactive: false, keyboard: false, zIndexOffset: 800,
-  }).addTo(map);
+  _filteredMatchActive = false;     // location click supersedes filter-match mode
+  drawClickGraphics(target, currentRadiusMetres());
   queryPoint(target.lat, target.lng);
   // No flyTo here — renderMatches will fit-bounds to the matched tracks.
 });
@@ -1152,9 +1515,8 @@ map.on(L.Draw.Event.CREATED, async e => {
   try { matches = await fetchPolygonMatches(); } finally { hideSpinner(); }
   if (matches.length) {
     renderMatches(matches, polygonBounds.getCenter());
-  } else {
-    map.flyToBounds(polygonBounds, { padding: [40, 40], maxZoom: 17, duration: 0.6 });
   }
+  map.flyToBounds(polygonBounds, { padding: [40, 40], maxZoom: 17, duration: 0.6 });
   saveState();
 });
 
@@ -1207,7 +1569,8 @@ async function pollImportStatus(statusEl) {
       statusEl.className = 'status ok';
       statusEl.textContent = j.message;
       await loadData();
-      fitView();
+      await loadAllActivities();
+      flyToLastRun();
       applyZoomMode();
       await loadStats();
     } else if (j.phase === 'error') {
@@ -1336,7 +1699,8 @@ async function pollSyncStatus(statusEl) {
       statusEl.className = 'status ok';
       statusEl.textContent = j.message;
       await loadData();
-      fitView();
+      await loadAllActivities();
+      flyToLastRun();
       applyZoomMode();
       await loadStats();
     } else if (j.phase === 'error') {
@@ -1380,6 +1744,47 @@ document.getElementById('matches-panel').addEventListener('mouseleave', () => {
 
 // Base map controls
 document.getElementById('base-layer').addEventListener('change', e => setBaseLayer(e.target.value));
+
+// Thunderforest API key — stored in localStorage (not the URL hash, since it's a secret).
+function _tfStatus(msg, ok) {
+  const el = document.getElementById('tf-apikey-status');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'status ' + (ok ? 'ok' : (msg ? 'error' : ''));
+}
+(function _initTFInput() {
+  const input = document.getElementById('tf-apikey');
+  if (!input) return;
+  input.value = _tfKey();
+  document.getElementById('tf-apikey-save').addEventListener('click', () => {
+    const v = input.value.trim();
+    if (!v) { _tfStatus('Empty key — nothing saved.', false); return; }
+    localStorage.setItem(TF_KEY_STORAGE, v);
+    rebuildTFLayers();
+    // Default to Thunderforest Landscape once a key is in place.
+    const sel = document.getElementById('base-layer');
+    if (sel) {
+      sel.value = 'Thunderforest Landscape';
+      setBaseLayer('Thunderforest Landscape');
+      saveState();
+    }
+    _tfStatus('Saved. Thunderforest Landscape is now active.', true);
+  });
+  document.getElementById('tf-apikey-clear').addEventListener('click', () => {
+    localStorage.removeItem(TF_KEY_STORAGE);
+    input.value = '';
+    // If we were on a TF layer, fall back to the default.
+    if (_isTFName(_activeBaseLayerName())) {
+      const sel = document.getElementById('base-layer');
+      if (sel) {
+        sel.value = 'Topo (OpenTopoMap)';
+        setBaseLayer('Topo (OpenTopoMap)');
+      }
+    }
+    rebuildTFLayers();
+    _tfStatus('Cleared.', true);
+  });
+})();
 document.getElementById('base-opacity').addEventListener('input', e => {
   document.getElementById('opacity-label').textContent = e.target.value;
   setBaseOpacity(parseInt(e.target.value, 10));
@@ -1407,7 +1812,8 @@ document.getElementById('heatmap-toggle')?.addEventListener('change', () => {
 
 // ---- Filter chip bar ----------------------------------------------------
 
-let _filterOptions = { years: [], types: [] };
+let _filterOptions = { min_date: null, max_date: null, types: [] };
+let _datePicker = null;  // flatpickr instance, created lazily on first menu open
 
 async function loadFilterOptions() {
   try {
@@ -1415,15 +1821,75 @@ async function loadFilterOptions() {
   } catch { /* leave defaults */ }
 }
 
+// Unfiltered slice of /index.json used for live filter-menu previews. Fetched
+// once at boot; the rest of the app reads from the filter-aware `indexById`,
+// which can shrink as filters apply. Keeping the unfiltered set in a separate
+// flat array lets the open filter menu re-bin the histogram against the
+// *current draft* of the other facets (date / type) without round-tripping
+// the server.
+let _allActivities = [];
+
+async function loadAllActivities() {
+  try {
+    const r = await fetch('/index.json');  // no filters
+    const j = await r.json();
+    _allActivities = (j.activities || []).map(a => ({
+      id: a.id,
+      start_time: a.start_time,
+      type: a.type,
+      distance_m: a.distance_m,
+    }));
+  } catch { /* leave empty */ }
+}
+
+// Read the unapplied state of the filter widgets so the histogram can react
+// before the user hits Apply. Distance bounds themselves are excluded — a
+// facet's histogram represents its own dimension, so the bars shouldn't move
+// as the user drags the distance handles.
+function _draftOtherFilters() {
+  const fp = _datePicker;
+  let date_start = null, date_end = null;
+  if (fp && fp.selectedDates && fp.selectedDates.length === 2) {
+    const ymd = d => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+    date_start = ymd(fp.selectedDates[0]);
+    date_end   = ymd(fp.selectedDates[1]);
+  }
+  // Type is now driven by the always-visible Road/Trail pills — they write
+  // straight into activeFilters.type, so the draft view just reads from there.
+  return { date_start, date_end, type: activeFilters.type };
+}
+
+function _activityMatchesOtherFilters(a, f) {
+  if (f.type && a.type !== f.type) return false;
+  if (f.date_start || f.date_end) {
+    if (!a.start_time) return false;
+    const d = a.start_time.slice(0, 10);
+    if (f.date_start && d < f.date_start) return false;
+    if (f.date_end && d > f.date_end) return false;
+  }
+  return true;
+}
+
+function _fmtDateChip() {
+  const a = activeFilters.date_start;
+  const b = activeFilters.date_end;
+  if (a && b) return `${a} → ${b}`;
+  if (a) return `since ${a}`;
+  if (b) return `until ${b}`;
+  return '';
+}
+
 function renderFilterChips() {
   const host = document.getElementById('filter-chips');
   const chips = [];
-  if (activeFilters.years.length) {
-    chips.push({ key: 'years', label: activeFilters.years.join(', ') });
-  }
-  if (activeFilters.type) {
-    chips.push({ key: 'type', label: activeFilters.type === 'TrailRun' ? 'Trail' : 'Road' });
-  }
+  const dateLabel = _fmtDateChip();
+  if (dateLabel) chips.push({ key: 'date', label: dateLabel });
+  // Type is now carried by the always-visible Road/Trail pills — no chip.
   if (activeFilters.min_km != null || activeFilters.max_km != null) {
     const lo = activeFilters.min_km != null ? `≥${activeFilters.min_km}` : '';
     const hi = activeFilters.max_km != null ? `<${activeFilters.max_km}` : '';
@@ -1436,72 +1902,470 @@ function renderFilterChips() {
   for (const el of host.querySelectorAll('.chip .x')) {
     el.addEventListener('click', () => {
       const key = el.parentElement.dataset.key;
-      if (key === 'years') activeFilters.years = [];
-      if (key === 'type') activeFilters.type = null;
+      if (key === 'date') { activeFilters.date_start = null; activeFilters.date_end = null; }
       if (key === 'dist') { activeFilters.min_km = null; activeFilters.max_km = null; }
       applyFilters();
     });
   }
 }
 
-function populateFilterMenu() {
-  const yearSel = document.getElementById('filter-year');
-  const have = new Set(Array.from(yearSel.options).map(o => Number(o.value)));
-  for (const y of _filterOptions.years) {
-    if (!have.has(y)) {
-      const opt = document.createElement('option');
-      opt.value = String(y); opt.textContent = String(y);
-      yearSel.appendChild(opt);
-    }
-  }
-  // Reflect active state in the form controls.
-  for (const opt of yearSel.options) {
-    opt.selected = activeFilters.years.includes(Number(opt.value));
-  }
-  document.getElementById('filter-type').value = activeFilters.type || '';
-  document.getElementById('filter-min-km').value = activeFilters.min_km ?? '';
-  document.getElementById('filter-max-km').value = activeFilters.max_km ?? '';
+// Preset shortcuts that drive the flatpickr range. `null` for an endpoint
+// means "use the library bound" (i.e. all-time on that side).
+function _datePresets() {
+  const today = new Date();
+  const ymd = d => d.toISOString().slice(0, 10);
+  const back = days => {
+    const d = new Date(today);
+    d.setDate(d.getDate() - days);
+    return d;
+  };
+  return [
+    { label: 'Last month',     from: () => [back(30),  today] },
+    { label: 'Last 6 months',  from: () => [back(182), today] },
+    { label: 'Last 12 months', from: () => [back(365), today] },
+  ];
 }
 
-document.getElementById('add-filter').addEventListener('click', e => {
-  e.stopPropagation();
+function _ensureDatePicker() {
+  if (_datePicker) return _datePicker;
+  const input = document.getElementById('filter-date-range');
+  if (!input || !window.flatpickr) return null;
+  const cfg = {
+    mode: 'range',
+    dateFormat: 'Y-m-d',
+    allowInput: false,
+    showMonths: 1,
+  };
+  if (_filterOptions.min_date) cfg.minDate = _filterOptions.min_date;
+  if (_filterOptions.max_date) cfg.maxDate = _filterOptions.max_date;
+  // Cascade: when the date range changes inside the menu, re-bin the
+  // distance histogram against the new draft date window. Only fire once
+  // the range is fully picked (or fully cleared) to avoid flicker mid-drag.
+  cfg.onChange = (selectedDates) => {
+    if (selectedDates.length === 0 || selectedDates.length === 2) {
+      _renderDistanceHistogram();
+      _syncShowMatchesEnabled();
+    }
+  };
+  _datePicker = flatpickr(input, cfg);
+
+  // Preset buttons sit above the input — clicking sets the picker.
+  const host = document.getElementById('filter-date-presets');
+  if (host && !host.dataset.wired) {
+    host.dataset.wired = '1';
+    host.innerHTML = _datePresets().map((p, i) =>
+      `<button type="button" class="date-preset" data-i="${i}">${p.label}</button>`
+    ).join('');
+    host.addEventListener('click', e => {
+      const btn = e.target.closest('button.date-preset');
+      if (!btn) return;
+      const preset = _datePresets()[Number(btn.dataset.i)];
+      const [from, to] = preset.from();
+      if (from && to) {
+        // Clamp both ends to the picker's allowed range. Without this, a
+        // preset like "Last 7 days" with `to = today` is rejected by
+        // flatpickr when today is past the library's max activity date —
+        // only `from` lands, and Apply sees a single-day selection.
+        const clamp = d => {
+          if (!d) return d;
+          let out = d;
+          if (_filterOptions.min_date) {
+            const lo = new Date(_filterOptions.min_date + 'T00:00:00');
+            if (out < lo) out = lo;
+          }
+          if (_filterOptions.max_date) {
+            const hi = new Date(_filterOptions.max_date + 'T00:00:00');
+            if (out > hi) out = hi;
+          }
+          return out;
+        };
+        _datePicker.setDate([clamp(from), clamp(to)], true);
+      } else {
+        _datePicker.clear();
+      }
+    });
+  }
+  return _datePicker;
+}
+
+// Distance widget state. The slider operates on a fixed [0, distMaxKm] range;
+// the histogram is recomputed from indexById on each open so it stays in sync
+// with whatever activities the rest of the filter set has loaded.
+let _distMaxKm = 100;
+let _distWiredHandlers = false;
+
+function _activityDistancesKm() {
+  // Use the unfiltered set, then narrow by the *draft* of the other facets
+  // (date + type) so the histogram cascades as the user edits inside the
+  // menu — without waiting for them to hit Apply.
+  const src = _allActivities.length ? _allActivities : Array.from(indexById.values());
+  const f = _draftOtherFilters();
+  const out = [];
+  for (const a of src) {
+    if (!Number.isFinite(a.distance_m)) continue;
+    if (!_activityMatchesOtherFilters(a, f)) continue;
+    out.push(a.distance_m / 1000);
+  }
+  return out;
+}
+
+function _renderDistanceHistogram() {
+  const svg = document.getElementById('filter-dist-hist');
+  const dists = _activityDistancesKm();
+  if (!svg) return;
+  // Cap at the actual longest run (rounded up to the next whole km). Snapping
+  // to a "nice" round number leaves the upper-handle tail empty; tight bound
+  // means the rightmost bars are populated and the slider tracks the real
+  // distribution.
+  const maxObserved = dists.length ? Math.max(...dists) : 10;
+  _distMaxKm = Math.max(1, Math.ceil(maxObserved));
+
+  const minR = document.getElementById('filter-dist-min');
+  const maxR = document.getElementById('filter-dist-max');
+  const prevMax = Number(maxR.max) || _distMaxKm;
+  minR.max = String(_distMaxKm);
+  maxR.max = String(_distMaxKm);
+  // If the cap shrank under the current handles (e.g. user picked a narrow
+  // date range and only short runs survive), pull the handles in. If the
+  // upper handle was at the previous cap, keep it at the new cap so the
+  // visual "open-ended" semantics survive.
+  let lo = Number(minR.value), hi = Number(maxR.value);
+  if (hi > _distMaxKm || hi === prevMax) hi = _distMaxKm;
+  if (lo > _distMaxKm) lo = _distMaxKm;
+  if (lo > hi) lo = hi;
+  minR.value = String(lo);
+  maxR.value = String(hi);
+
+  // Bin counts: one bar per integer km up to _distMaxKm, clipped to a max
+  // bar count of 50 so very long-distance libraries still get a sensible
+  // bar width.
+  const bins = Math.min(_distMaxKm, 50);
+  const binW = _distMaxKm / bins;
+  const counts = new Array(bins).fill(0);
+  for (const d of dists) {
+    const i = Math.min(bins - 1, Math.max(0, Math.floor(d / binW)));
+    counts[i] += 1;
+  }
+  const peak = Math.max(1, ...counts);
+
+  // viewBox lets the SVG stretch to its CSS width without us touching the
+  // DOM on resize. Bars are width-1 in a `bins`-wide space; height scales
+  // counts/peak across a height of 100.
+  svg.setAttribute('viewBox', `0 0 ${bins} 100`);
+  const bars = counts.map((c, i) => {
+    const h = c / peak * 100;
+    return `<rect x="${i}" y="${100 - h}" width="1" height="${h}" fill="#1a5a8a" fill-opacity="0.35"/>`;
+  }).join('');
+  svg.innerHTML = bars;
+  _updateDistTrack();
+}
+
+function _updateDistTrack() {
+  const minR = document.getElementById('filter-dist-min');
+  const maxR = document.getElementById('filter-dist-max');
+  const track = document.getElementById('filter-dist-track');
+  const readout = document.getElementById('filter-dist-readout');
+  if (!minR || !maxR || !track) return;
+  let lo = Number(minR.value);
+  let hi = Number(maxR.value);
+  if (lo > hi) {
+    // Snap the handle the user is dragging: which one is furthest from a
+    // valid position?
+    if (document.activeElement === minR) { hi = lo; maxR.value = String(hi); }
+    else { lo = hi; minR.value = String(lo); }
+  }
+  const pct = v => (v / _distMaxKm) * 100;
+  track.style.left  = `${pct(lo)}%`;
+  track.style.right = `${100 - pct(hi)}%`;
+  readout.textContent = `${lo} km – ${hi} km`;
+}
+
+function _setDistRange(loKm, hiKm) {
+  const minR = document.getElementById('filter-dist-min');
+  const maxR = document.getElementById('filter-dist-max');
+  // Clamp to widget range so handles never sit off-track.
+  const lo = Math.max(0, Math.min(_distMaxKm, loKm ?? 0));
+  const hi = Math.max(0, Math.min(_distMaxKm, hiKm ?? _distMaxKm));
+  minR.value = String(lo);
+  maxR.value = String(hi);
+  _updateDistTrack();
+}
+
+function _wireDistanceHandlers() {
+  if (_distWiredHandlers) return;
+  _distWiredHandlers = true;
+  for (const id of ['filter-dist-min', 'filter-dist-max']) {
+    document.getElementById(id).addEventListener('input', _updateDistTrack);
+  }
+}
+
+function populateFilterMenu() {
+  const fp = _ensureDatePicker();
+  if (fp) {
+    if (activeFilters.date_start && activeFilters.date_end) {
+      fp.setDate([activeFilters.date_start, activeFilters.date_end], false);
+    } else if (activeFilters.date_start) {
+      fp.setDate([activeFilters.date_start], false);
+    } else {
+      fp.clear();
+    }
+  }
+  // Distance: refresh histogram against current indexById, then position handles.
+  _renderDistanceHistogram();
+  _wireDistanceHandlers();
+  _setDistRange(activeFilters.min_km, activeFilters.max_km);
+  _syncShowMatchesEnabled();
+}
+
+function toggleFilterMenu(anchorEl) {
   const menu = document.getElementById('filter-menu');
-  const btn = e.currentTarget;
-  const rect = btn.getBoundingClientRect();
-  menu.style.top = `${rect.bottom + 6}px`;
-  menu.style.left = `${Math.max(8, rect.left - 80)}px`;
+  const isMobile = window.matchMedia('(max-width: 700px)').matches;
+  if (isMobile) {
+    menu.style.top = '';
+    menu.style.left = '';
+  } else if (anchorEl) {
+    const rect = anchorEl.getBoundingClientRect();
+    menu.style.top = `${rect.top}px`;
+    // Anchor to the right of the left toolbar (or button) so the popover
+    // sits beside the control rather than overlapping it.
+    menu.style.left = `${rect.right + 8}px`;
+  }
   populateFilterMenu();
-  // Close other menus.
-  for (const id of ['view-menu', 'display-menu']) document.getElementById(id).classList.add('hidden');
+  for (const id of ['display-menu']) document.getElementById(id).classList.add('hidden');
   menu.classList.toggle('hidden');
-});
+  document.body.classList.toggle('filter-menu-open', !menu.classList.contains('hidden'));
+}
+
+// Read the draft pane state (date/type/distance) into `activeFilters`.
+// Shared by Apply and Show-as-matches so both buttons emit the same filter set.
+function _readFilterDraft() {
+  const ymd = d => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+  const sel = _datePicker?.selectedDates || [];
+  if (sel.length === 2) {
+    activeFilters.date_start = ymd(sel[0]);
+    activeFilters.date_end   = ymd(sel[1]);
+  } else if (sel.length === 1) {
+    activeFilters.date_start = ymd(sel[0]);
+    activeFilters.date_end   = ymd(sel[0]);
+  } else {
+    activeFilters.date_start = null;
+    activeFilters.date_end   = null;
+  }
+  // Type is owned by the always-visible Road/Trail pills — they write
+  // activeFilters.type directly, so nothing to read here.
+
+  const lo = Number(document.getElementById('filter-dist-min').value);
+  const hi = Number(document.getElementById('filter-dist-max').value);
+  activeFilters.min_km = lo > 0 ? lo : null;
+  activeFilters.max_km = hi < _distMaxKm ? hi : null;
+}
+
+function _closeFilterMenu() {
+  document.getElementById('filter-menu').classList.add('hidden');
+  document.body.classList.remove('filter-menu-open');
+}
 
 document.getElementById('filter-apply').addEventListener('click', () => {
-  const yearSel = document.getElementById('filter-year');
-  activeFilters.years = Array.from(yearSel.selectedOptions).map(o => Number(o.value));
-  activeFilters.type = document.getElementById('filter-type').value || null;
-  const minV = document.getElementById('filter-min-km').value;
-  const maxV = document.getElementById('filter-max-km').value;
-  activeFilters.min_km = minV === '' ? null : Number(minV);
-  activeFilters.max_km = maxV === '' ? null : Number(maxV);
-  document.getElementById('filter-menu').classList.add('hidden');
+  _readFilterDraft();
+  _closeFilterMenu();
   applyFilters();
+});
+
+// Marks "Show matches in view" mode so subsequent filter changes (notably
+// the always-visible type pills) can re-run the match query instead of
+// reverting to no matches. Cleared on clearMatches / location click / draw.
+let _filteredMatchActive = false;
+
+async function fetchFilteredMatches() {
+  if (!hasActiveFilters()) return [];
+  // Bound to the current viewport — matches the mental model of every other
+  // interaction on this map and keeps the response size in check.
+  const b = map.getBounds();
+  const s = b.getSouth(), n = b.getNorth(), w = b.getWest(), e = b.getEast();
+  const wkt = `POLYGON((${w} ${s}, ${e} ${s}, ${e} ${n}, ${w} ${n}, ${w} ${s}))`;
+  const fd = new FormData();
+  fd.append('wkt', wkt);
+  for (const [k, v] of new URLSearchParams(filterQueryString())) fd.append(k, v);
+  const r = await fetch('/match/polygon', { method: 'POST', body: fd });
+  return r.ok ? r.json() : [];
+}
+
+document.getElementById('filter-show-matches').addEventListener('click', async () => {
+  _readFilterDraft();
+  if (!hasActiveFilters()) return;
+  _closeFilterMenu();
+  // Heatmap is exploratory and visually fights with the red match polylines.
+  // Suppress it up-front so it goes away immediately rather than after the
+  // (potentially seconds-long) /match/filter response lands.
+  heatmapClickSuppressed = true;
+  applyHeatmapVisibility();
+  _syncHeatmapToggleEnabled();
+  await applyFilters();
+  showSpinner('Matching…');
+  let matches = [];
+  try { matches = await fetchFilteredMatches(); } finally { hideSpinner(); }
+  if (!matches.length) {
+    _filteredMatchActive = false;
+    showToast('No runs match these filters.');
+    return;
+  }
+  _filteredMatchActive = true;
+  renderMatches(matches, null, { fit: false });
+  // "Show as matches" is explicitly "take me to these" — fit-bounds, but
+  // only if the resulting view would stay in track-zoom mode. A very wide
+  // filter (e.g. "all >40 km runs" across the UK) would otherwise zoom out
+  // below HEX_ZOOM_THRESHOLD, which triggers applyZoomMode → clearMatchLayers
+  // and wipes the polylines we just drew.
+  let b = null;
+  for (const m of matches) {
+    const layer = matchLayersById.get(m.id);
+    if (!layer) continue;
+    const lb = layer.getBounds();
+    b = b ? b.extend(lb) : L.latLngBounds(lb.getSouthWest(), lb.getNorthEast());
+  }
+  if (b) {
+    const targetZoom = map.getBoundsZoom(b, false, [20, 20]);
+    if (targetZoom >= HEX_ZOOM_THRESHOLD) {
+      map.flyToBounds(b, { padding: [20, 20], maxZoom: 17, duration: 0.6 });
+    }
+  }
+});
+
+// Mirror the draft state to the Show-as-matches enabled flag. The pane's
+// edit cascade already fires change/input events on these controls; we just
+// re-read the draft into activeFilters scratch and check hasActiveFilters().
+function _syncShowMatchesEnabled() {
+  const btn = document.getElementById('filter-show-matches');
+  if (!btn) return;
+  // Snapshot live activeFilters, evaluate draft, then restore — we only want
+  // the read, not to commit until Apply / Show-as-matches is clicked.
+  const snapshot = { ...activeFilters };
+  _readFilterDraft();
+  const enabled = hasActiveFilters();
+  activeFilters = snapshot;
+  btn.disabled = !enabled;
+}
+
+for (const ev of ['change', 'input']) {
+  document.getElementById('filter-menu').addEventListener(ev, _syncShowMatchesEnabled);
+}
+
+document.getElementById('filter-date-clear')?.addEventListener('click', () => {
+  if (_datePicker) _datePicker.clear();
+  _renderDistanceHistogram();
 });
 
 document.getElementById('filter-clear').addEventListener('click', () => {
-  activeFilters = { years: [], type: null, min_km: null, max_km: null };
+  activeFilters = { date_start: null, date_end: null, type: null, min_km: null, max_km: null };
+  _allTypesOff = false;
+  if (_datePicker) _datePicker.clear();
+  _setDistRange(0, _distMaxKm);
+  _syncTypePills();
   document.getElementById('filter-menu').classList.add('hidden');
+  document.body.classList.remove('filter-menu-open');
   applyFilters();
 });
+
+// ---- Road / Trail pills --------------------------------------------------
+//
+// Always-visible pills in the top filter-bar drive `activeFilters.type` directly.
+// Semantics: both on = no filter (default); exactly one on = filter to that
+// type. The handler forbids both-off — clicking the lit pill snaps the other
+// one back on, so the user always has at least one type active.
+
+// activeFilters.type carries the standard backend filter ('Run' | 'TrailRun' | null).
+// "both off" is a client-side-only state: aggregate + matches are hidden and a
+// notice surfaces. The backend never sees a request in that state, so the model
+// stays in sync with the (i) banner.
+let _allTypesOff = false;
+
+function _syncTypePills() {
+  const road = document.querySelector('#type-pills [data-type="Run"]');
+  const trail = document.querySelector('#type-pills [data-type="TrailRun"]');
+  const notice = document.getElementById('type-empty-notice');
+  if (!road || !trail) return;
+  let roadOn, trailOn;
+  if (_allTypesOff) {
+    roadOn = false; trailOn = false;
+  } else if (activeFilters.type === 'Run') {
+    roadOn = true; trailOn = false;
+  } else if (activeFilters.type === 'TrailRun') {
+    roadOn = false; trailOn = true;
+  } else {
+    roadOn = true; trailOn = true;
+  }
+  road.classList.toggle('active', roadOn);
+  road.setAttribute('aria-pressed', roadOn ? 'true' : 'false');
+  trail.classList.toggle('active', trailOn);
+  trail.setAttribute('aria-pressed', trailOn ? 'true' : 'false');
+  if (notice) notice.classList.toggle('hidden', !_allTypesOff);
+}
+
+function _hideAllTracks() {
+  // Aggregate off, hex off, any matches cleared. Heatmap suppressed too.
+  _detachAggregate();
+  if (hexLayer) { map.removeLayer(hexLayer); hexLayer = null; }
+  clearMatches();
+  clearClickGraphics();
+  if (heatmapLayer && map.hasLayer(heatmapLayer)) map.removeLayer(heatmapLayer);
+}
+
+for (const pill of document.querySelectorAll('#type-pills .type-pill')) {
+  pill.addEventListener('click', () => {
+    const me = pill.dataset.type;
+    const other = me === 'Run' ? 'TrailRun' : 'Run';
+    // Resolve current "on" state from activeFilters + _allTypesOff.
+    let meOn, otherOn;
+    if (_allTypesOff) { meOn = false; otherOn = false; }
+    else if (activeFilters.type === me)    { meOn = true;  otherOn = false; }
+    else if (activeFilters.type === other) { meOn = false; otherOn = true;  }
+    else                                    { meOn = true;  otherOn = true;  }
+
+    const newMeOn = !meOn;
+    if (!newMeOn && !otherOn) {
+      _allTypesOff = true;
+      activeFilters.type = null;
+      _syncTypePills();
+      _hideAllTracks();
+      pushHistoryCheckpoint();
+      saveState();
+      return;
+    }
+    _allTypesOff = false;
+    activeFilters.type = (newMeOn && otherOn) ? null
+                       : newMeOn ? me
+                       : other;
+    _syncTypePills();
+    if (!document.getElementById('filter-menu').classList.contains('hidden')) {
+      _renderDistanceHistogram();
+    }
+    applyFilters();
+  });
+}
 
 async function applyFilters() {
   pushHistoryCheckpoint();
   renderFilterChips();
+  _syncTypePills();
   // Filters change the data underlying every layer + match. Reload everything.
   invalidateHeatmapData();
   await loadData();
   // Re-run any in-flight matches against the new filter set.
-  if (lastMatches.length && lastClickLatLng) {
+  if (_filteredMatchActive) {
+    // Show-matches-in-view mode — re-query against new filters + current view.
+    const matches = await fetchFilteredMatches();
+    if (matches.length) {
+      _filteredMatchActive = true;       // renderMatches doesn't touch the flag
+      renderMatches(matches, null, { fit: false });
+    } else {
+      clearMatches();
+    }
+  } else if (lastMatches.length && lastClickLatLng) {
     await queryPoint(lastClickLatLng.lat, lastClickLatLng.lng);
   } else if (polygonFilter) {
     const matches = await fetchPolygonMatches();
@@ -1540,18 +2404,18 @@ async function applyHeatmapVisibility() {
   // Heatmap is suppressed while a match is active — switching back to
   // exploring mode (clearMatches) un-suppresses and re-applies.
   if (!wanted || !inTrackZoom || heatmapClickSuppressed || !window.L.heatLayer) {
-    if (heatmapLayer && map.hasLayer(heatmapLayer)) map.removeLayer(heatmapLayer);
+    _disposeHeatmap();
     return;
   }
   const pts = await loadHeatmapPoints();
-  if (!heatmapLayer) {
-    heatmapLayer = L.heatLayer(pts, {
-      radius: 18, blur: 22, minOpacity: 0.25, maxZoom: 17,
-    });
-  } else {
-    heatmapLayer.setLatLngs(pts);
-  }
-  if (!map.hasLayer(heatmapLayer)) heatmapLayer.addTo(map);
+  // Recreate the layer each time it goes on — reusing a once-removed
+  // L.heatLayer raced its internal rAF against the null `_map`, throwing
+  // "Cannot read properties of null (reading '_animating')".
+  _disposeHeatmap();
+  heatmapLayer = L.heatLayer(pts, {
+    radius: 18, blur: 22, minOpacity: 0.25, maxZoom: 17,
+  });
+  heatmapLayer.addTo(map);
 }
 
 function invalidateHeatmapData() {
@@ -1632,19 +2496,20 @@ async function applyURLState({ animate } = { animate: false }) {
   const saved = loadSavedState();
   _restoringState = true;
 
-  const prevFilterKey = JSON.stringify([currentPreset, polygonFilter, activeFilters]);
+  const prevFilterKey = JSON.stringify([polygonFilter, activeFilters]);
 
   // Reset filters from URL
-  currentPreset = saved?.preset || 'all';
   polygonFilter = saved?.polygonFilter || null;
   polygonBounds = null;
   activeFilters = {
-    years: saved?.filterYears || [],
+    date_start: saved?.filterDateStart || null,
+    date_end: saved?.filterDateEnd || null,
     type: saved?.filterType || null,
     min_km: saved?.filterMinKm ?? null,
     max_km: saved?.filterMaxKm ?? null,
   };
   renderFilterChips();
+  _syncTypePills();
   invalidateHeatmapData();
   drawnItems.clearLayers();
   if (polygonFilter) {
@@ -1666,6 +2531,13 @@ async function applyURLState({ animate } = { animate: false }) {
   if (lock) lock.checked = saved ? !!saved.lockToTrack : true;
   const zoomFit = document.getElementById('zoom-to-fit-matches');
   if (zoomFit) zoomFit.checked = !!saved?.zoomToFit;
+  const dim = document.getElementById('dim-opacity');
+  const dimVal = saved?.dimOpacity ?? 45;
+  if (dim) {
+    dim.value = String(dimVal);
+    const dimLabel = document.getElementById('dim-opacity-label');
+    if (dimLabel) dimLabel.textContent = String(dimVal);
+  }
 
   // Base layer + opacity
   const baseSel = document.getElementById('base-layer');
@@ -1687,7 +2559,7 @@ async function applyURLState({ animate } = { animate: false }) {
     document.getElementById('search-radius-label').textContent = srVal > 0 ? `${srVal} m` : 'auto';
   }
 
-  const newFilterKey = JSON.stringify([currentPreset, polygonFilter, activeFilters]);
+  const newFilterKey = JSON.stringify([polygonFilter, activeFilters]);
   const filterChanged = newFilterKey !== prevFilterKey;
   const haveSavedView = saved && saved.center && Array.isArray(saved.center) && saved.zoom != null;
 
@@ -1699,16 +2571,22 @@ async function applyURLState({ animate } = { animate: false }) {
   if (haveSavedView) {
     map.setView(L.latLng(saved.center[0], saved.center[1]), saved.zoom, { animate });
   } else {
-    fitView();
+    flyToLastRun();
   }
 
   applyZoomMode();
 
-  // Re-apply polygon highlight after tracks are loaded.
+  // Re-apply polygon / click highlight after tracks are loaded.
   clearMatches();
   if (polygonFilter && polygonBounds) {
     const matches = await fetchPolygonMatches();
     if (matches.length) renderMatches(matches, polygonBounds.getCenter());
+  } else if (saved?.clickLatLng) {
+    // Restore the active click pin + matches the user had before reload.
+    await queryPoint(saved.clickLatLng[0], saved.clickLatLng[1]);
+    if (saved.matchId != null && currentEmphasise) {
+      currentEmphasise(saved.matchId, { force: true });
+    }
   }
 
   _restoringState = false;
@@ -1717,13 +2595,8 @@ async function applyURLState({ animate } = { animate: false }) {
 window.addEventListener('popstate', () => applyURLState({ animate: true }));
 
 (async () => {
-  const fresh = !location.hash || location.hash.length < 2;
-  await loadFilterOptions();
+  await Promise.all([loadFilterOptions(), loadAllActivities()]);
   await applyURLState({ animate: false });
-
-  if (fresh && currentPreset === 'recent90') {
-    showToast('Showing runs from the last 90 days. Use the ⟲ menu to change.');
-  }
 
   await refreshStravaUI();
   await loadStats();

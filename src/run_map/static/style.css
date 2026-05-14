@@ -173,6 +173,8 @@ fieldset label { display: inline-block; margin-right: 12px; }
 
 .check-row { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: .9rem; color: #333; }
 .check-row input { width: auto; margin: 0; }
+.check-row.disabled { opacity: 0.45; cursor: not-allowed; }
+.check-row.disabled input { cursor: not-allowed; }
 
 input[type="text"], input:not([type]), input[type="password"], input[type="file"], select {
   width: 100%;
@@ -327,6 +329,63 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
 #filter-chips, #filter-bar > .chip {
   pointer-events: auto;
 }
+/* Type pills live below the leaflet topleft toolbar (under the funnel
+   button). Vertical stack so they don't crowd the chip bar. */
+#type-pills {
+  position: absolute;
+  top: 200px;          /* below ⟲ + 🗺 + funnel + draw toolbar */
+  left: 10px;
+  z-index: 1050;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  pointer-events: auto;
+}
+.type-pill {
+  background: rgba(255,255,255,0.85);
+  color: #888;
+  border: 1px solid rgba(0,0,0,0.15);
+  border-radius: 14px;
+  padding: 3px 12px;
+  font-size: .82rem;
+  min-height: 0;
+  margin: 0;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.type-pill:hover { color: #1a5a8a; border-color: #1a5a8a; background: white; }
+.type-pill.active {
+  background: #1a5a8a;
+  color: white;
+  border-color: #1a5a8a;
+}
+.type-pill.active:hover { background: #154a73; color: white; }
+.type-empty-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #fff7e0;
+  border: 1px solid #e3c876;
+  color: #6b5310;
+  border-radius: 14px;
+  padding: 3px 10px 3px 6px;
+  font-size: .8rem;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+.type-empty-notice.hidden { display: none; }
+.type-empty-notice .info-i {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #d4a534;
+  color: white;
+  font-style: italic;
+  font-weight: 700;
+  font-size: .72rem;
+  font-family: Georgia, serif;
+}
 #filter-chips {
   display: flex;
   gap: 6px;
@@ -381,7 +440,136 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
   gap: 6px;
 }
 #filter-menu label { color: #444; min-width: 5em; }
-#filter-menu select#filter-year { flex: 1; }
+#filter-menu .row.column { flex-direction: column; align-items: stretch; gap: 6px; }
+#filter-menu input#filter-date-range {
+  width: 100%;
+  padding: 4px 6px;
+  font: inherit;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fafafa;
+  cursor: pointer;
+}
+#filter-date-presets { display: flex; flex-wrap: wrap; gap: 4px; }
+#filter-date-presets .date-preset {
+  font: inherit;
+  font-size: .8rem;
+  padding: 2px 8px;
+  border: 1px solid #cfd6dd;
+  border-radius: 999px;
+  background: white;
+  color: #1a5a8a;
+  cursor: pointer;
+}
+#filter-date-presets .date-preset:hover { background: #eef4f9; }
+
+.filter-section { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; border-top: 1px solid #eee; }
+.filter-section:first-of-type { border-top: none; padding-top: 0; }
+.filter-section h3 { margin: 0; font-size: .85rem; color: #333; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+.filter-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.filter-section-head label { font-weight: 600; color: #333; min-width: 0; }
+.filter-section-head .dist-readout { color: #666; font-size: .85rem; }
+.filter-actions {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-top: 6px; padding-top: 10px; border-top: 1px solid #eee;
+}
+.filter-action-buttons { display: flex; gap: 8px; }
+.filter-action-buttons button { min-height: 0; padding: 6px 14px; font-size: .85rem; }
+.link-btn,
+.link-btn:hover {
+  background: transparent; border: none; padding: 0; margin: 0;
+  font: inherit; font-size: .8rem; min-height: 0;
+  color: #1a5a8a; cursor: pointer; text-decoration: underline;
+}
+.link-btn:hover { color: #0e3f5e; text-decoration: underline; }
+
+/* Type checkboxes — inline next to the Type label. */
+#filter-menu .check-row.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  font-size: .9rem;
+  cursor: pointer;
+  margin-right: 4px;
+}
+#filter-menu .check-row.inline input { margin: 0; }
+
+/* Distance histogram + dual-handle slider. The two range inputs sit on top
+   of each other with `pointer-events: none` on their tracks, so each handle
+   is independently draggable. The coloured `#filter-dist-track` div shows
+   the selected band between them; the SVG behind shows the distribution. */
+#filter-dist-widget {
+  position: relative;
+  height: 64px;
+  margin-top: 4px;
+}
+#filter-dist-hist {
+  position: absolute;
+  inset: 0 0 16px 0;
+  width: 100%;
+  height: calc(100% - 16px);
+  display: block;
+}
+#filter-dist-track {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: 8px;
+  height: 4px;
+  background: #1a5a8a;
+  border-radius: 2px;
+  pointer-events: none;
+}
+#filter-dist-widget input[type="range"] {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  background: transparent;
+  pointer-events: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+/* Track itself stays invisible — the .filter-dist-track div + histogram
+   provide the visual; only the thumbs are interactive. */
+#filter-dist-widget input[type="range"]::-webkit-slider-runnable-track {
+  background: transparent;
+  height: 4px;
+}
+#filter-dist-widget input[type="range"]::-moz-range-track {
+  background: transparent;
+  height: 4px;
+}
+#filter-dist-widget input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  pointer-events: auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: white;
+  border: 2px solid #1a5a8a;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  cursor: pointer;
+  margin-top: -5px;
+}
+#filter-dist-widget input[type="range"]::-moz-range-thumb {
+  pointer-events: auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: white;
+  border: 2px solid #1a5a8a;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  cursor: pointer;
+}
+#filter-menu .dist-readout {
+  font-size: .8rem;
+  color: #555;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
 
 /* ---- Activity preview card ---- */
 #preview-panel {
@@ -440,6 +628,15 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
   margin: 8px 0;
   display: block;
 }
+
+/* Swipeable pages. On desktop the two `.preview-page` sections just stack
+   vertically (block flow) and the dots are hidden. On mobile we turn the
+   container into a horizontal scroll-snap carousel. */
+#preview-content .preview-pages { display: block; }
+#preview-content .preview-page { display: block; }
+#preview-content .preview-page.photo { padding-top: 4px; }
+#preview-content .preview-page.photo img { margin: 0; }
+#preview-content .preview-dots { display: none; }
 #preview-content .preview-link {
   display: inline-block;
   margin-top: 6px;
@@ -553,12 +750,13 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
 @media (max-width: 700px) {
   .floating-pill { font-size: .75rem; padding: 5px 12px; }
 
-  /* Right rail → full-width column docked to the top. Preserves the
-     ordering (matches above embed) but adapts to portrait phones. */
+  /* Right rail → near-full-width column docked to the top. We leave a 56 px
+     gutter on the left for the Leaflet toolbar (zoom / polygon / ⟲ / 🗺)
+     so the popup doesn't swallow the controls. */
   #right-rail {
     top: 12px;
     right: 12px;
-    left: 12px;
+    left: 56px;
     bottom: auto;
     width: auto;
     max-width: none;
@@ -568,6 +766,52 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
   }
   #matches-panel { max-height: 38vh; }
   #preview-panel { max-height: 50vh; flex: 0 1 auto; }
+
+  /* Swipeable preview: two pages side-by-side with scroll-snap. The dot
+     indicators reflect the active page (updated by _wirePreviewSwipe). */
+  #preview-content { padding: 0; overflow: hidden; }
+  #preview-content .preview-pages {
+    display: flex;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  #preview-content .preview-pages::-webkit-scrollbar { display: none; }
+  #preview-content .preview-page {
+    flex: 0 0 100%;
+    scroll-snap-align: start;
+    padding: 12px 14px;
+    box-sizing: border-box;
+  }
+  #preview-content .preview-page.photo {
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #111;
+  }
+  #preview-content .preview-page.photo img {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    object-fit: contain;
+  }
+  #preview-content .preview-dots {
+    display: flex;
+    justify-content: center;
+    gap: 6px;
+    padding: 6px 0 8px;
+    background: white;
+  }
+  #preview-content .preview-dots .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #ccc;
+    transition: background .15s ease;
+  }
+  #preview-content .preview-dots .dot.on { background: #1a5a8a; }
 
   /* The bg-status pill and brand controls share the bottom — keep them
      from overlapping by pushing the pill slightly up. */
@@ -581,4 +825,22 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
 
   /* Settings drawer at near-full width */
   #settings-drawer { width: 92vw; }
+
+  /* Filter menu becomes a top sheet rather than a popover anchored under the
+     "+ Filter" button — a popover at the chip-bar position partially covers
+     the matches panel and looks like a layout bug. Full-width-ish sheet at
+     the top with the right-rail pushed below makes the modal nature obvious. */
+  #filter-menu:not(.hidden) {
+    position: fixed !important;
+    top: 8px !important;
+    left: 12px !important;
+    right: 12px !important;
+    width: auto;
+    min-width: 0;
+    max-height: calc(100vh - 80px);
+    overflow-y: auto;
+    z-index: 1200;
+  }
+  /* Push the rail down so it doesn't peek out from behind the sheet. */
+  body.filter-menu-open #right-rail { display: none; }
 }

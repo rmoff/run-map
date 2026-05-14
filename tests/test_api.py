@@ -131,6 +131,69 @@ def test_aggregate_dedupes_overlapping_segments(app_client):
         f"dedupe didn't shrink output: overlap={overlap_segs} vs disjoint={disjoint_segs}"
 
 
+def _zigzag(n: int = 60, x0: float = -1.5, y0: float = 53.5,
+            dx: float = 1.2e-4) -> list[tuple[float, float]]:
+    # Mixed-bearing zigzag with vertex spacing finer than the coarsest LOD's
+    # grid (4.5e-4°) so each LOD produces a visibly different segment count.
+    return [(x0 + i * dx, y0 + ((i * 7) % 5) * 1.0e-4) for i in range(n)]
+
+
+def test_aggregate_lod_grid_sizes(app_client):
+    """Coarser grids must dedupe more aggressively: high > mid > low.
+
+    The same underlying track is rebuilt at each LOD; we expect strictly
+    decreasing segment counts as the grid coarsens (with enough vertices
+    that grid-cell collisions actually differ between bands).
+    """
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, coords=_zigzag())
+
+    counts = {}
+    for lod in ("low", "mid", "high"):
+        r = client.get(f"/aggregate.geojson?lod={lod}")
+        assert r.status_code == 200
+        counts[lod] = r.json()["features"][0]["properties"]["segment_count"]
+
+    assert counts["high"] > counts["mid"] > counts["low"], (
+        f"LOD ordering broken: {counts}"
+    )
+
+
+def test_aggregate_lod_unknown_rejected(app_client):
+    client, *_ = app_client
+    r = client.get("/aggregate.geojson?lod=bogus")
+    assert r.status_code == 400
+
+
+def test_aggregate_lod_cache_per_band(app_client):
+    """Each LOD produces a distinct cache file; fetching one doesn't satisfy another."""
+    client, db_mod, api_mod = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, coords=_zigzag())
+
+    client.get("/aggregate.geojson?lod=low")
+    client.get("/aggregate.geojson?lod=mid")
+    client.get("/aggregate.geojson?lod=high")
+
+    cache_files = sorted(p.name for p in api_mod._CACHE_DIR.glob("aggregate.*.json.gz"))
+    # Three distinct sig hashes, one per lod.
+    assert len(cache_files) == 3, f"expected 3 lod cache files, got {cache_files}"
+
+
+def test_warm_default_aggregates_writes_all_lods(app_client):
+    """The ingest warm-up hook builds all three no-filter LOD caches up front."""
+    client, db_mod, api_mod = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, coords=_zigzag())
+
+    api_mod._invalidate_caches()
+    assert not list(api_mod._CACHE_DIR.glob("aggregate.*.json.gz"))
+    api_mod._warm_default_aggregates()
+    cache_files = sorted(p.name for p in api_mod._CACHE_DIR.glob("aggregate.*.json.gz"))
+    assert len(cache_files) == 3, f"warm-up didn't pre-build all LODs: {cache_files}"
+
+
 def test_aggregate_normalises_direction(app_client):
     """A track run forwards and a track run backwards over the same path
     must collapse to the same segments — not double them."""
@@ -235,7 +298,7 @@ def test_heatmap_denser_than_index_samples(app_client):
 # ---- Filter params -------------------------------------------------------
 
 
-def test_aggregate_filters_by_year(app_client):
+def test_aggregate_filters_by_date_range(app_client):
     client, db_mod, _ = app_client
     conn = db_mod.connect()
     _seed(conn, id=1, start="2024-06-01T08:00:00")
@@ -243,12 +306,49 @@ def test_aggregate_filters_by_year(app_client):
           coords=[(2.0, 48.0), (2.002, 48.001), (2.003, 48.003)])
 
     all_segs = client.get("/aggregate.geojson").json()["features"][0]["properties"]["segment_count"]
-    y2025 = client.get("/aggregate.geojson?years=2025").json()["features"][0]["properties"]["segment_count"]
-    y2024 = client.get("/aggregate.geojson?years=2024").json()["features"][0]["properties"]["segment_count"]
+
+    # Window covering 2025 only — bounds are inclusive at both ends (start_time::DATE).
+    y2025 = client.get(
+        "/aggregate.geojson?date_start=2025-01-01&date_end=2025-12-31"
+    ).json()["features"][0]["properties"]["segment_count"]
+    y2024 = client.get(
+        "/aggregate.geojson?date_start=2024-01-01&date_end=2024-12-31"
+    ).json()["features"][0]["properties"]["segment_count"]
 
     assert y2025 < all_segs and y2024 < all_segs
-    # Both single-year subsets together should account for everything.
+    # Disjoint year windows should account for everything between them.
     assert y2025 + y2024 == all_segs
+
+
+def test_aggregate_filters_open_ended_date(app_client):
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, start="2024-06-01T08:00:00")
+    _seed(conn, id=2, start="2025-06-01T08:00:00",
+          coords=[(2.0, 48.0), (2.002, 48.001), (2.003, 48.003)])
+
+    # `date_start` alone — open-ended on the upper side.
+    after = client.get("/aggregate.geojson?date_start=2025-01-01").json()
+    assert after["features"][0]["properties"]["segment_count"] > 0
+
+    # `date_end` alone — open-ended on the lower side.
+    before = client.get("/aggregate.geojson?date_end=2024-12-31").json()
+    assert before["features"][0]["properties"]["segment_count"] > 0
+
+
+def test_filter_clause_rejects_bad_date(app_client):
+    client, *_ = app_client
+    r = client.get("/aggregate.geojson?date_start=not-a-date")
+    assert r.status_code == 400
+
+
+def test_filter_clause_ignores_legacy_year_param(app_client):
+    """Legacy URL hashes may still carry ?years=… — should be silently ignored, not 400."""
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1)
+    r = client.get("/aggregate.geojson?years=2024")
+    assert r.status_code == 200
 
 
 def test_index_filters_by_type(app_client):
@@ -300,7 +400,8 @@ def test_filter_options_endpoint(app_client):
 
     r = client.get("/filter-options")
     j = r.json()
-    assert j["years"] == [2025, 2024]
+    assert j["min_date"] == "2024-06-01"
+    assert j["max_date"] == "2025-06-01"
     assert set(j["types"]) == {"Run", "TrailRun"}
 
 

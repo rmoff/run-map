@@ -6,6 +6,7 @@
   <title>run-map</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -43,13 +44,6 @@
     <button id="toast-close" class="icon-btn" aria-label="Dismiss">×</button>
   </div>
 
-  <!-- View menu (anchored under the map's view button) -->
-  <div id="view-menu" class="hidden" role="menu">
-    <button data-view="all">All data</button>
-    <button data-view="recent90">Last 90 days</button>
-    <button data-view="dense">Most traversed area</button>
-  </div>
-
   <!-- Display popover (anchored under the 🗺 control) -->
   <div id="display-menu" class="hidden" role="menu">
     <label for="base-layer">Base layer</label>
@@ -59,44 +53,64 @@
       <option>Light (Carto)</option>
       <option>Cycle (CyclOSM)</option>
       <option>Satellite</option>
+      <option>Thunderforest Outdoors</option>
+      <option>Thunderforest Landscape</option>
+      <option>Thunderforest OpenCycleMap</option>
     </select>
     <label for="base-opacity">Base opacity: <span id="opacity-label">50</span>%</label>
     <input type="range" id="base-opacity" min="10" max="100" step="5" value="50">
+    <label for="dim-opacity">Non-matched track opacity: <span id="dim-opacity-label">45</span>%</label>
+    <input type="range" id="dim-opacity" min="0" max="100" step="5" value="45">
     <label class="check-row">
       <input type="checkbox" id="heatmap-toggle">
       Heatmap overlay
     </label>
   </div>
 
-  <!-- Filter chip bar (top-center) -->
+  <!-- Filter chip bar (top-center) — active-filter chips only now. -->
   <div id="filter-bar">
     <div id="filter-chips"></div>
-    <button id="add-filter" class="chip add" type="button" title="Add filter">+ Filter</button>
+  </div>
+
+  <!-- Type pills stacked under the filter funnel icon (top-left toolbar). -->
+  <div id="type-pills" role="group" aria-label="Activity type">
+    <button type="button" class="type-pill active" data-type="Run" aria-pressed="true">Road</button>
+    <button type="button" class="type-pill active" data-type="TrailRun" aria-pressed="true">Trail</button>
+    <span id="type-empty-notice" class="type-empty-notice hidden" role="status">
+      <span class="info-i" aria-hidden="true">i</span>All tracks hidden
+    </span>
   </div>
 
   <!-- Add-filter popover -->
   <div id="filter-menu" class="hidden" role="menu">
-    <div class="row">
-      <label for="filter-year">Year</label>
-      <select id="filter-year" multiple size="6"></select>
-    </div>
-    <div class="row">
-      <label for="filter-type">Type</label>
-      <select id="filter-type">
-        <option value="">Any</option>
-        <option value="Run">Road</option>
-        <option value="TrailRun">Trail</option>
-      </select>
-    </div>
-    <div class="row">
-      <label>Distance (km)</label>
-      <input type="number" id="filter-min-km" placeholder="min" min="0" step="1" style="width:6em">
-      <span>–</span>
-      <input type="number" id="filter-max-km" placeholder="max" min="0" step="1" style="width:6em">
-    </div>
-    <div class="row" style="justify-content:flex-end">
-      <button id="filter-clear" class="ghost">Clear all</button>
-      <button id="filter-apply">Apply</button>
+    <section class="filter-section">
+      <div class="filter-section-head">
+        <h3>Date</h3>
+        <button type="button" id="filter-date-clear" class="link-btn" title="Remove date filter">Clear</button>
+      </div>
+      <div id="filter-date-presets" class="date-presets"></div>
+      <input type="text" id="filter-date-range" placeholder="Pick a range…" readonly aria-label="Date range">
+    </section>
+
+<section class="filter-section">
+      <div class="filter-section-head">
+        <h3>Distance</h3>
+        <span class="dist-readout"><span id="filter-dist-readout">0 km – 100 km</span></span>
+      </div>
+      <div id="filter-dist-widget">
+        <svg id="filter-dist-hist" preserveAspectRatio="none" aria-hidden="true"></svg>
+        <div id="filter-dist-track"></div>
+        <input type="range" id="filter-dist-min" min="0" max="100" step="1" value="0">
+        <input type="range" id="filter-dist-max" min="0" max="100" step="1" value="100">
+      </div>
+    </section>
+
+    <div class="filter-actions">
+      <button type="button" id="filter-clear" class="link-btn" title="Reset all filters">Clear all</button>
+      <div class="filter-action-buttons">
+        <button id="filter-apply" class="ghost" title="Narrow the aggregate map to this filter set">Filter all tracks</button>
+        <button id="filter-show-matches" disabled title="Render filtered tracks within the visible map area as red match polylines">Show matches in view</button>
+      </div>
     </div>
   </div>
 
@@ -129,6 +143,21 @@
         <input type="checkbox" id="zoom-to-fit-matches">
         Zoom to fit matched tracks
       </label>
+
+      <section class="data-section">
+        <h3>Thunderforest</h3>
+        <p class="muted" style="margin:4px 0">
+          Paste your Thunderforest API key to enable the Outdoors / Landscape / OpenCycleMap base layers.
+          No account? <a href="https://manage.thunderforest.com/users/sign_up?price=hobby-project-usd" target="_blank" rel="noopener">Sign up for a free hobby key</a>.
+        </p>
+        <label for="tf-apikey">API key</label>
+        <input id="tf-apikey" type="password" autocomplete="off" placeholder="apikey">
+        <div class="row">
+          <button id="tf-apikey-save">Save</button>
+          <button id="tf-apikey-clear" class="ghost">Clear</button>
+        </div>
+        <div id="tf-apikey-status" class="status"></div>
+      </section>
 
       <section class="data-section">
         <div class="section-header">
@@ -168,6 +197,7 @@
   <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
   <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
   <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
