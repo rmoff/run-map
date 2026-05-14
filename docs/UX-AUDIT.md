@@ -307,7 +307,55 @@ A general observation: nothing about this layout is mobile-native. There is no b
 
 ## Mobile coverage-checklist sweep
 
-_To be filled in Task 4._
+- Zoom + control — ✅ covered by M1/M2 (`mobile-boot.png`, `mobile-toolbar-vs-rail.png`); same icon-only failure as desktop, amplified by lack of hover (M2).
+- Zoom − control — ✅ same family as Zoom + (`mobile-boot.png`).
+- Polygon-draw control — ✅ covered by M11 (`mobile-polygon-armed.png`); arming chrome unreadable at 390 px.
+- ⟲ reset button — ✅ covered by M2 (`mobile-toolbar-vs-rail.png`); same icon mismatch as D1.
+- 🗺 display popover — ✅ covered by M4 (`mobile-display-open.png`); popover covers the Filter toolbar button.
+- Funnel / filter pane — ✅ covered by M3 (`mobile-filter-open.png`); quasi-full-screen sheet without sheet affordances.
+- ⚙ settings drawer — ✅ covered by M5 (`mobile-settings-open.png`); 92 % of viewport, no drag handle.
+- ❌ Brand pill — not present (re-confirmed on mobile via DOM query: no `.brand` / `.logo`, no `run-map` text node in chrome). Same conclusion as desktop **D20**.
+- Road / Trail pills (both on) — ✅ covered by M1 (`mobile-boot.png`).
+- Road / Trail pills (one off) — ✅ covered by inheritance from D13 (same control); the **mobile-only** defect is M1 (pills overlap toolbar) — see also **M14** for "one-off" tap risk.
+- Road / Trail pills (both off) — ✅ covered by M12 (`mobile-pills-both-off.png`).
+- Filter chip bar — ✅ covered by M10 (`mobile-filter-applied.png`); ~12 px × glyph below tap-target guidelines.
+- Matches panel × dismiss — ✅ covered by M6 (`mobile-map-click.png`, `mobile-matches-toolbar-overlap.png`); `#matches-close` confirmed in DOM at top-right of panel.
+- Strava preview panel × dismiss — ✅ covered by M7/M8 (`mobile-preview-page1.png`, `mobile-preview-page2.png`, `mobile-match-pinned.png`); `#preview-close` confirmed in DOM.
+- Click → match (click marker + radius circle) — ✅ covered by M6 (`mobile-map-click.png`); click marker visible at the centre of the matches.
+- ❌ Polygon close × at NE corner of the polygon — not present in this build. DOM query for any `×`-bearing element after arming the polygon shows only `matches-close`, `preview-close`, `toast-close`, `close-settings`; no polygon-specific close handle. Logged as new finding **M15**.
+- ⚠️ Hex cells at low zoom — narrative never zoomed out on mobile; captured in `mobile-sweep-hex-cells.png`. Clicking a cell is a silent no-op (`mobile-sweep-hex-click.png`) — same behaviour as desktop **D18**; on mobile the cells are also small relative to a fingertip, so tap accuracy is even worse. Logged as **M14** for the mobile-specific tap-size amplification.
+- ⚠️ Heatmap auto-hide while match active — narrative noted the desktop behaviour (D5) but did not screenshot on mobile. Captured: `mobile-sweep-heatmap-on.png` (heatmap visible before click) and `mobile-sweep-heatmap-vs-match.png` (heatmap replaced by red match polylines, `#heatmap-toggle` confirmed `checked=true, disabled=true`). Same defect as D5 — no new mobile-only finding, but the misleading checkbox state reproduces on touch.
+- ⚠️ Esc clears selection — narrative did not cover Esc on mobile (touch keyboards rarely expose it). Captured `mobile-sweep-after-esc.png`. UI clears but `cll=` survives in URL — same as D6. Mobile users in practice cannot reach Esc at all, so the only way to clear a selection is the `#matches-close` × tap target in the awkward top-right thumb zone — logged as **M16**.
+- ⚠️ URL reload restores state — narrative did not test on mobile. Loaded `#z=14&ll=…&hm=1&cll=…&mid=18472657487` directly; `mobile-sweep-after-reload.png` shows the matches panel restored (`#matches-panel` display=flex) but the preview panel NOT restored (`#preview-panel` display=none). Same partial-state defect as D15.
+- ⚠️ Browser back across navigation — narrative did not test. Navigated to a different hash then `goBack()`; `mobile-sweep-after-back.png` shows the prior `mid=`/`cll=` state restored, matching D15 / boot behaviour.
+- Mobile-only: top-spanning right rail with 56 px left gutter — ⚠️ M1 already flags that the gutter is **0 px** in this build (pills overlap toolbar). Right-rail panels (`#matches-panel`) do dock at x=56 (`mobile-matches-toolbar-overlap.png`), so the *rail* respects the 56 px column — but the left pills do not stay outside it, so the promised gutter is effectively absent. See M1.
+- Mobile-only: two-page Strava preview carousel — ✅ covered by M7 (`mobile-preview-page1.png`, `mobile-preview-page2.png`).
+- Mobile-only: carousel dot indicators — ✅ covered by M7 (6 × 6 px static decorations, non-interactive).
+
+### M14. Hex cells at low zoom — same silent no-op as desktop, worse on touch `confusing`
+
+![](img/ux-audit/mobile-sweep-hex-cells.png)
+![](img/ux-audit/mobile-sweep-hex-click.png)
+
+Loading the app at z=8 on mobile produces the same aggregate hex-cell overlay as desktop (D18). Tapping a hex cell produces no response: no popover, no tooltip, no count, no marker. The mobile-specific concern beyond D18: hex cells at z=8 occupy roughly 30–40 px squares on a 390 px viewport, which is at or below the recommended 44 px tap target — so even *if* tapping did something, a fingertip would frequently hit the wrong cell. The hex layer is effectively a decorative chrome strip on mobile.
+
+**Observation:** Same silent-hex defect as D18; on mobile the cells are also borderline-untapped due to size.
+
+### M15. No polygon close-× control at the polygon's NE corner `nit`
+
+![](img/ux-audit/mobile-sweep-polygon-closed.png)
+
+The Pass 2 checklist expected a small × button anchored to the north-east corner of a drawn polygon (to dismiss the filter region without re-arming the draw tool). After arming polygon-draw on mobile and inspecting the DOM, the only `×`-bearing elements are `#matches-close`, `#preview-close`, `#toast-close`, and `#close-settings` — none associated with the polygon. The Leaflet.draw armed-state tooltip provides "Cancel" / "Finish" / "Delete last point" controls but no on-polygon close handle once a polygon has been drawn. To clear a polygon filter the user must re-open the polygon tool's edit mode or refresh — neither of which is discoverable from the polygon outline itself.
+
+**Observation:** No on-polygon × close handle is rendered (DOM-confirmed). Spec describes one; build does not include it.
+
+### M16. Mobile users have no Esc-equivalent for clearing a selection `friction`
+
+![](img/ux-audit/mobile-sweep-after-esc.png)
+
+On desktop Esc clears the match panel and pinned track (D6). On mobile, the mobile-Safari / mobile-Chrome on-screen keyboard does not expose an Escape key when no input is focused, so the keyboard handler is effectively unreachable. The only mobile-accessible dismiss is the `#matches-close` × button at top-right (x=340, y=20, 34 × 42), which sits in the worst thumb-reach zone for a right-handed user holding the phone. There is no tap-outside-to-dismiss, no swipe-down, no drag-handle gesture. So the desktop has two ways to clear a selection (Esc, ×) and mobile has one — and that one is in the hardest-to-reach corner.
+
+**Observation:** Mobile loses the Esc affordance entirely; the only dismiss is a 34-px × in the top-right corner — worst-case ergonomics on a phone.
 
 ---
 
