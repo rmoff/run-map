@@ -127,6 +127,8 @@
         <div id="stats-content"><p class="muted">No data yet.</p></div>
       </section>
 
+            <section class="data-section">
+
       <h3>Click behaviour</h3>
       <label for="search-radius">Search radius: <span id="search-radius-label">auto</span></label>
       <div class="row">
@@ -143,11 +145,12 @@
         <input type="checkbox" id="zoom-to-fit-matches">
         Zoom to fit matched tracks
       </label>
+    </section>
 
       <section class="data-section">
         <h3>Thunderforest</h3>
         <p class="muted" style="margin:4px 0">
-          Paste your Thunderforest API key to enable the Outdoors / Landscape / OpenCycleMap base layers.
+          Paste your Thunderforest API key to enable <a href="https://thunderforest.com">Thunderforest</a> base layers.<br/>
           No account? <a href="https://manage.thunderforest.com/users/sign_up?price=hobby-project-usd" target="_blank" rel="noopener">Sign up for a free hobby key</a>.
         </p>
         <label for="tf-apikey">API key</label>
@@ -162,6 +165,8 @@
       <section class="data-section">
         <div class="section-header">
           <h3>Strava API</h3>
+        <div id="stats-content"><p class="muted">
+          Get your API details from the <a href="https://www.strava.com/settings/api">Strava API page</a> in your profile.</p></div>
           <button id="test-creds" class="ghost" hidden>Test connection</button>
         </div>
         <div id="test-status" class="status"></div>
