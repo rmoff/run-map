@@ -635,4 +635,418 @@ Each entry asks three questions from the icon/label alone before touching it: wh
 
 ## Pass 3 — Proposed fixes
 
-_To be filled in Task 6._
+The proposals below are scoped: each addresses a specific cluster of findings. Two are bigger-than-tweak: **P1** redesigns the toolbar end-to-end (already on TODO.md item 1) and **P11** introduces a mobile sheet pattern. Everything else is incremental.
+
+### P1. Coherent icon-toolbar redesign (Lucide icon font)
+
+**Addresses:** D1, D2, D3, D9, D16, I3, I4, I5, M2, M11; subsumes TODO item 1 ("Redesign the UI buttons entirely").
+
+**Proposal:**
+
+Replace the current mixed-glyph toolbar (Leaflet `+`/`−` CSS arrows, ⟲ Unicode, 🗺 emoji, custom SVG funnel) with a single icon-font toolbar using **Lucide** (MIT-licensed, ~1 kB per glyph inlined as SVG, matches the existing minimal aesthetic). Replace `L.Control.Zoom` and `L.Control.Draw` with a single custom `L.Control` whose DOM is rendered by app.js so we control markup.
+
+Icon mapping table (top-left toolbar, top→bottom):
+
+| Slot | Action | Current | Lucide icon | Tooltip / aria-label |
+|---|---|---|---|---|
+| 1 | Zoom in | Leaflet `+` | `plus` | "Zoom in" |
+| 2 | Zoom out | Leaflet `−` | `minus` | "Zoom out" |
+| 3 | Fly to most-recent run | ⟲ | `locate-fixed` | "Jump to latest run" |
+| 4 | Draw polygon | Leaflet.draw pentagon | `pentagon` | "Draw polygon to filter" |
+| 5 | Draw rectangle | Leaflet.draw rectangle | `square-dashed` | "Draw rectangle to filter" |
+| 6 | Display popover | 🗺 | `sliders-horizontal` | "Display options" |
+| 7 | Filter popover | Custom funnel SVG | `filter` | "Filter runs" |
+
+Group with hairline separators between (1–2), (3), (4–5), (6–7) to telegraph "navigate / locate / draw / view". A separator is a 1 px `border-bottom` between adjacent buttons within the same `.leaflet-bar` container.
+
+Each button gets a **custom styled tooltip** (small dark pill rendered next to the button after a 400 ms hover delay) replacing the unstyled `title` attribute. Tooltip CSS already exists for `#bg-status`-style pills; reuse the same look. On touch devices (`@media (hover: none)`) the tooltip never opens but is replaced by a one-time bottom-pill labelled "Tap an icon to see what it does" on first boot (dismissable).
+
+Active states:
+- The polygon and rectangle buttons get a `.armed` class while their draw mode is active: `background: #fff3cd; box-shadow: inset 0 0 0 2px #f0a93b`. This is the missing "you are in draw mode" signal (D9, M11).
+- The display / filter buttons get an `.open` class while their popover is open: `background: #e7f0ff`.
+
+Drop the bottom-left `#open-settings` gear from its detached position (D16) and move it into the same toolbar stack as slot 8 (`settings` icon, Lucide `settings`). The previous bottom-left coordinate becomes free for the brand pill (see P12).
+
+**Why this addresses the findings:** unifies the icon language (D2/I-pattern), retires the misleading ⟲ glyph (D1, I4), retires the over-narrow 🗺 emoji (D3, I5), gives drawing mode a visible armed state (D9, M11), restores a single "controls live here" region (D16), and provides the styled tooltips that desktop users notice and mobile users can ignore (D2, M2). Mockup outline:
+
+```
+┌───┐
+│ + │  zoom in
+├───┤
+│ − │  zoom out
+├───┤   ← separator
+│ ⊕ │  locate-fixed → "Jump to latest run"
+├───┤   ← separator
+│ ⬠ │  polygon
+├───┤
+│ ▢ │  rectangle
+├───┤   ← separator
+│ ≡ │  sliders-horizontal → display
+├───┤
+│ ▽ │  filter
+├───┤   ← separator (new)
+│ ⚙ │  settings (relocated from bottom-left)
+└───┘
+```
+
+### P2. Rename the two filter-action buttons to disambiguate
+
+**Addresses:** D4, I22, I23, M3.
+
+**Proposal:**
+
+In `#filter-menu .filter-action-buttons`, replace the two existing button labels and add a one-line helper sentence above the row:
+
+```html
+<p class="filter-action-help">Apply the date/distance filter to:</p>
+<button id="filter-apply" class="ghost">All tracks on the map</button>
+<button id="filter-show-matches" disabled>Just tracks in this view</button>
+```
+
+Helper text styled `font-size:12px; color:var(--muted)`. Both buttons given matching weight (drop the existing primary/ghost split — they are equivalent verbs, just different scopes). When `#filter-show-matches` is disabled, add an inline reason directly under it: `<span class="hint">Set a date or distance first.</span>` rendered via JS when the disabled flag flips.
+
+Drop the word "matches" from `#filter-show-matches`: that word is reserved for the click→match flow elsewhere in the UI, and reusing it for "filtered set in view" is the core of the confusion (I23). New label "Just tracks in this view" reads as a scope qualifier, not a separate concept.
+
+**Why this addresses the findings:** the two buttons now read as "do the same thing, on a different scope" rather than as two different concepts (D4). The helper sentence supplies the missing explanation that today lives in `title=` (M3). Removing the overloaded word "matches" disentangles I23 from the click→match `matches` panel (I14, I15).
+
+### P3. Replace the heatmap silent-mute with an honest mute
+
+**Addresses:** D5, I19.
+
+**Proposal:**
+
+When a match set is active and `#heatmap-toggle` is force-disabled, also force the checkbox to `checked=false` AND render an inline note inside the popover, immediately under the toggle:
+
+```html
+<label class="check-row">
+  <input type="checkbox" id="heatmap-toggle">
+  Heatmap overlay
+</label>
+<p class="heatmap-mute-note hidden" id="heatmap-mute-note">
+  Hidden while matches are shown. Clear matches (Esc or ×) to use the heatmap.
+</p>
+```
+
+Toggle `.hidden` on `#heatmap-mute-note` from the same code path that disables the checkbox. Store the user's prior heatmap-on intent in a module-level flag (`pendingHeatmap`) and restore it on match-clear, exactly as the spec describes — but the checkbox now visually reflects "off while matches are on" rather than lying about being on.
+
+**Why this addresses the findings:** the checkbox no longer claims a state it isn't showing (D5/I19). The inline note tells the user *why* and *how to undo* without forcing them to discover the coupling by experiment.
+
+### P4. Hex layer — legend + interactive click
+
+**Addresses:** D18, M14.
+
+**Proposal:**
+
+When the hex layer is mounted (zoom < 11), render two new elements:
+
+1. **Legend** — small swatch strip pinned at bottom-right (`#hex-legend`), shown only while `#hexLayer` is on the map: a horizontal gradient from white→red labelled `1 run` … `50+ runs`. Inline SVG, ~140 px wide, ~32 px tall. Hidden via `.hidden` outside the hex zoom band.
+2. **Click handler** — each hex cell becomes clickable: on click, fly to `cellBoundsLatLng(h3index)` at max-zoom 13 (one zoom step below the per-track threshold of 11, so the user lands inside the band where the aggregate is visible). Add `cursor: pointer` to the hex polygon style. On the same click, show a small floating tooltip "27 runs in this cell — zooming in" anchored to the cell centroid for 1.5 s before flying.
+
+For mobile (M14): increase hex resolution by one level only at viewports < 700 px so cells render at ≥ 44 px on a 390 px screen.
+
+**Why this addresses the findings:** the silent layer becomes legible (legend) and tappable (D18 click no-op fixed). The mobile-specific resolution bump turns the tap target into something a fingertip can actually hit (M14).
+
+### P5. Make the type pills look like checkboxes and add the empty-state notice
+
+**Addresses:** D13, D19, M12, I9, I10.
+
+**Proposal:**
+
+The `#type-empty-notice` element already exists in `index.html` — wire it up. In `app.js`, when both pills become inactive, remove `.hidden` from `#type-empty-notice` so the inline `(i) All tracks hidden` message shows. The notice should sit immediately below the second pill, not float — `position: relative` within `#type-pills`.
+
+Restyle the pills to look like toggles rather than tabs:
+- Add a small leading checkbox glyph inside each pill: when active, a Lucide `check` SVG (12 px) inline before the label; when inactive, an outlined empty box.
+- Use distinct background colours rather than the current subtle tint: active = `background: #2b6cb0; color: white`, inactive = `background: white; color: #2b6cb0; border: 1px solid currentColor`.
+- Update `aria-pressed` (already in place) and add `role="checkbox"` so screen readers don't read them as tabs.
+
+Remove the meaningless triangle-down caret beneath the pills (D13 mentions one — confirm in DOM; if it's a debug artefact, delete it).
+
+**Why this addresses the findings:** the inline notice closes the silent-empty-map hole (D19/M12). The checkbox styling tells a fresh user "these are independent toggles" before any click (D13). Mobile collision with the toolbar is dealt with separately in P11.
+
+### P6. Filter chip — turn it into a real button with adequate tap target
+
+**Addresses:** D14, M10, I11, I12, I13.
+
+**Proposal:**
+
+Promote the chip from a div with a `<span class="x">` to a structured button group:
+
+```html
+<div class="chip" data-filter-key="date">
+  <button class="chip-body" type="button">2025-05-14 → 2026-05-12</button>
+  <button class="chip-remove" type="button" aria-label="Remove date filter">
+    <svg class="lucide-x" …/>
+  </button>
+</div>
+```
+
+CSS: chip height bumps from 26 px → 32 px on desktop, 40 px on mobile (`@media (max-width: 700px) .chip { min-height: 40px }`). The remove × button gets `min-width: 32px; min-height: 32px` desktop, `44 × 44` mobile, with the Lucide `x` glyph centred. Tab-focusable (it's a `<button>` now). On click, removes the filter from state and pushes new URL.
+
+Make the chip body itself clickable too — clicking opens the filter pane scrolled to the relevant section (date chip opens date section, distance chip opens distance section). That gives the chip an edit affordance, not just dismiss.
+
+**Why this addresses the findings:** the × becomes keyboard-focusable and tap-target-compliant on touch (D14, M10). The chip body acquires a meaningful action (edit) instead of being inert. Consistent with both desktop and mobile guidelines.
+
+### P7. Polygon close-× handle at the NE corner
+
+**Addresses:** M15, I3.
+
+**Proposal:**
+
+When a polygon or rectangle is drawn and committed, programmatically attach a small DOM marker at the layer's NE corner (`bounds.getNorthEast()`), using `L.divIcon`:
+
+```js
+const ne = drawnLayer.getBounds().getNorthEast();
+const closeMarker = L.marker(ne, {
+  icon: L.divIcon({
+    className: 'polygon-close',
+    html: '<button aria-label="Clear polygon filter">×</button>',
+    iconSize: [28, 28], iconAnchor: [14, 14]
+  }),
+  interactive: true,
+  bubblingMouseEvents: false,
+  pane: 'matchPane'
+}).addTo(map);
+closeMarker.on('click', () => clearPolygonFilter());
+```
+
+CSS for `.polygon-close button`: 28 × 28 px desktop, 36 × 36 px mobile; white background, 1 px red border, red × glyph; z-index above match polylines. The marker auto-repositions when the map moves because Leaflet anchors `L.marker` to a latlng — no manual sync needed. Tear down on `clearPolygonFilter()` and on Esc.
+
+**Why this addresses the findings:** the spec-promised polygon close handle (M15) becomes real. Reinforces the polygon armed/drawn lifecycle covered by D9 (I3): arm → tooltip + button highlight (P1) → draw → close × pinned to shape.
+
+### P8. Match-row link disambiguation + header
+
+**Addresses:** D7, D8, M6, I14, I15.
+
+**Proposal:**
+
+Restructure the match-row markup so the title is **not** a `<a href="#">`. Each row becomes:
+
+```html
+<div class="match-row" data-mid="123">
+  <button class="match-pin" type="button" aria-label="Pin this run">
+    <svg class="lucide-pin" …/>
+  </button>
+  <div class="match-meta">
+    <a class="match-date" href="https://www.strava.com/activities/123" target="_blank" rel="noopener">2025-05-14</a>
+    <span class="match-dist">12.4 km</span>
+    <span class="match-title">Punk Panther Wharfedale Skyline</span>
+  </div>
+  <a class="match-strava" href="https://www.strava.com/activities/123" target="_blank" rel="noopener" aria-label="Open on Strava">
+    <svg class="lucide-external-link" …/>
+  </a>
+</div>
+```
+
+Two clearly different affordances per row: a leading pin icon (pins / flies-to) and a trailing external-link icon (opens Strava). Date and title are plain text + a single underlined date link (still goes to Strava, but only ONE underlined link exists per row — the explicit external-link icon is the new path).
+
+Add a `#matches-header` above the rows:
+
+```html
+<div id="matches-header">
+  <h3>4 runs near here</h3>
+  <button id="matches-close" …>×</button>
+</div>
+```
+
+Heading text becomes "N runs near here" for click-driven matches, "N runs in this view" for polygon/filter-driven matches, "N runs in this hex cell" for hex drill-in. Keep the existing `#matches-close` × but move it inside this header.
+
+**Why this addresses the findings:** the three-identical-links problem (D8, M6) goes away — pin and Strava are now visually and structurally distinct. The missing summary header (D7) tells the user the count and the basis of the list. Mobile (M6) inherits the same fix; the title can now wrap multiple lines without competing for click semantics with the date.
+
+### P9. Make the search-radius slider live and labelled
+
+**Addresses:** D12, I25b.
+
+**Proposal:**
+
+Remove the `#apply-radius` button. Live-update like the Display popover sliders. Re-label the slider and value:
+
+```html
+<label for="search-radius">
+  Search radius:
+  <span id="search-radius-label">auto (scales with zoom)</span>
+</label>
+<input type="range" id="search-radius" min="0" max="500" step="10" value="0">
+<datalist id="search-radius-ticks">
+  <option value="0" label="auto"></option>
+  <option value="100" label="100 m"></option>
+  <option value="250" label="250 m"></option>
+  <option value="500" label="500 m"></option>
+</datalist>
+<p class="muted" style="font-size:11px">0 = auto; otherwise the snap-to-track radius in metres.</p>
+```
+
+Slider value updates `#search-radius-label` live: at 0 → `auto (scales with zoom)`, otherwise `{n} m`. Persist the new value through the existing URL/localStorage path on `input` events.
+
+**Why this addresses the findings:** the only Apply-required slider in the app becomes live like its peers (D12 / I25b inconsistency). Units, range, and the meaning of "auto" become explicit.
+
+### P10. Split the Settings drawer into "Preferences" and "Data sources"
+
+**Addresses:** D11, D16, I7, I25e–I25i, M5.
+
+**Proposal:**
+
+Two-tab layout inside `#settings-drawer`. Tab 1 = **Preferences** (default), tab 2 = **Data sources**. Implemented as plain `<button role="tab">` + `[role="tabpanel"]`.
+
+Tab 1 — Preferences:
+- Library stats (I25a; small dashboard card).
+- Click behaviour: Search radius (P9), Lock-to-track, Zoom-to-fit-matches.
+- Move the Thunderforest API key here as a sub-section "**Optional basemaps**" with a copy line "After saving a key, switch base layers from the Display popover." This co-locates a credential with its consumer (cross-drawer dependency in I25e).
+
+Tab 2 — Data sources:
+- Strava API: Test, Credentials, Sync range, Sync now, Forget tokens. Wrap `Forget tokens` and `Sync now` in a `<form>` that emits a `confirm()` dialog before running (M5 destructive-on-touch risk).
+- Import Strava export ZIP (I25i).
+
+Add a thin header inside the drawer that names the active tab so the section title is always visible while scrolling.
+
+Also: on mobile (≤700 px) anchor the drawer as a true bottom sheet with a 16 px drag handle and a swipe-down-to-dismiss gesture (see P11 for the sheet system). On desktop the drawer stays left-edge as today.
+
+**Why this addresses the findings:** cleaves session prefs from credentials/admin (D11), gives Settings a clear identity ("preferences live here, data lives there"). Co-locating the Thunderforest key with the base-layer picker on the Preferences tab fixes the cross-drawer dependency (I25e). The destructive-action confirmations close the mobile mis-tap risk (M5).
+
+### P11. Mobile sheet pattern + thumb-zone primary controls
+
+**Addresses:** M1, M3, M4, M5, M7, M8, M9, M13, M16.
+
+**Proposal:**
+
+A mobile-only layout reorganisation (active under `@media (max-width: 700px)`):
+
+1. **Move the type pills off the left toolbar column.** They become a horizontal pill pair anchored bottom-centre at `y: calc(100% - 64px)`, above the bottom safe area. The 56-px gutter the spec promised is reclaimed and the toolbar buttons (Display, Filter) become reachable (M1).
+
+2. **Promote matches and preview into a bottom sheet** — single sheet with two snap-detents (peek at 25 vh showing match count + first row; expanded at 75 vh). The carousel inside the preview keeps its scroll-snap, but the dot indicators become tappable buttons (40 × 40 px, dot rendered as a 10 px circle inside). The sheet has a 4 × 36 px drag handle at the top; swipe-down dismisses (M7, M8, M13).
+
+3. **Add a `Done` ghost-button to popovers.** `#display-menu` and `#filter-menu` on mobile gain a sticky footer `Done` button. Replaces the absent × close (M3, M4) and gives the user a clear exit.
+
+4. **Move the matches-close × and preview-close × out of the corner.** The sheet's drag handle is the primary dismiss; the × stays as a backup but is rendered on the sheet header at left (40 × 40 px), within thumb reach (M9, M16).
+
+5. **Add a tap-outside-to-dismiss + swipe-down-to-dismiss for all sheets** (M16). This replaces the unreachable Esc on mobile.
+
+6. **Filter popover becomes a sheet too** at the same 75 vh detent (M3).
+
+Mockup target (text sketch — implementer can iterate from this):
+
+```
+┌───────────────────────────┐
+│  [≡ ▽]  ← top toolbar     │   reachable but compact
+│  [+ −]    (collapses to   │
+│  [⊕]       2 cols on phone)
+│                           │
+│         (map)             │
+│                           │
+│   [Road ▣]  [Trail ▣]     │   pills here, bottom-centre
+│  ─────── drag handle ──── │
+│   2 runs near here    ×   │   sheet header, peek detent
+│   ▸ 2025-05-14 12.4 km    │
+└───────────────────────────┘
+```
+
+**Why this addresses the findings:** every mobile-specific defect in the audit is reachability or layout collision; this proposal concretely re-floors the layout to platform-native sheet conventions (M13) and frees the top-left from collisions (M1). The drag handle + swipe-dismiss replaces the missing Esc on mobile (M16). Dot indicators become real targets (M7).
+
+### P12. Brand pill + base wayfinding
+
+**Addresses:** D20, I8.
+
+**Proposal:**
+
+Add a `#brand-pill` element at bottom-left (the position freed when the gear moves into the toolbar — see P1):
+
+```html
+<a id="brand-pill" class="floating-pill" href="/" aria-label="run-map home">
+  <svg class="lucide-map" …/>
+  <span>run-map</span>
+</a>
+```
+
+Pill style mirrors `#bg-status`: 28 px tall, white background, 8 px padding, subtle shadow. Static — not interactive beyond reloading the page. On mobile (≤700 px) hide it to preserve thumb space (P11 puts pills there instead).
+
+**Why this addresses the findings:** restores the missing brand mentioned in the Pass 2 checklist (D20, I8) without competing for space with the controls. Acts as wayfinding in a multi-tab browser session.
+
+### P13. Esc should also clear residual URL state
+
+**Addresses:** D6, I14, I15.
+
+**Proposal:**
+
+In the `keydown` handler that today clears the visible selection on Esc, additionally:
+- Strip `cll`, `mid`, `poly` from the URL hash and call `history.pushState` (so back-button still works).
+- Clear the click marker and radius circle from the map even though they're already empty visually — defensive.
+
+Same change to the `#matches-close` and `#preview-close` click handlers: those today leave `cll`/`mid` in the URL (D6/I15). After P13 a closed panel + a copied URL produce a fresh boot state, not a half-restored one.
+
+**Why this addresses the findings:** the invisible-URL-state ghost (D6) is the same defect as the half-restored deep link (D15) — both come from URL writes not being symmetric with UI clears. P13 fixes the UI→URL direction; P14 fixes the URL→UI direction.
+
+### P14. Deep-link restores the preview panel too
+
+**Addresses:** D15, I15.
+
+**Proposal:**
+
+In `applyURLState()`, after `currentEmphasise(mid)` runs, if `mid` is present also call `openPreviewFor(mid)` (the existing function used by pin-click). Use the inline match polyline returned by `/match` to seed the preview without an extra round-trip.
+
+If the preview-panel is intentionally closed on a previously-deep-linked URL, P13 already strips `mid` so this code path no longer fires on the now-stripped URL — the two changes are paired.
+
+**Why this addresses the findings:** restores the missing detail card on reload of a deep link (D15). Pairs cleanly with P13 so the round-trip URL ↔ UI is symmetric in both directions.
+
+### P15. Hash-param naming — alias the cryptic short keys
+
+**Addresses:** D17.
+
+**Proposal:**
+
+Don't break existing URLs, but on next write, emit the long form **in parallel** with the short form, and accept either on read. Mapping (read both, write long):
+
+| Old | New | Meaning |
+|---|---|---|
+| `z` | `zoom` | map zoom |
+| `ll` | `center` | map centre lat,lng |
+| `cll` | `click` | click lat,lng |
+| `mid` | `match` | emphasised match id |
+| `fds` | `from` | filter date start |
+| `fde` | `to` | filter date end |
+| `ftype` | `type` | filter type |
+| `fmin` | `min_km` | filter min km |
+| `fmax` | `max_km` | filter max km |
+| `hm` | `heatmap` | heatmap toggle |
+| `op` | `base_opacity` | basemap opacity |
+| `dop` | `dim_opacity` | non-matched opacity |
+| `sr` | `radius` | search radius |
+| `lock` | `lock_track` | lock-to-track toggle |
+| `zfit` | `zoom_fit` | zoom-to-fit-matches |
+| `base` | `base` | basemap (unchanged) |
+| `poly` | `poly` | polygon WKT (unchanged) |
+
+Migration: read code accepts both for one release cycle; write code emits long form only.
+
+**Why this addresses the findings:** debuggability for shared URLs (D17). Backwards compatibility avoids breaking outstanding bookmarks.
+
+### P16. Filter pane — single Clear path
+
+**Addresses:** I20, I24.
+
+**Proposal:**
+
+Remove the section-local "Clear" button next to the Date heading (`#filter-date-clear`). Keep only the bottom-row `Clear all` link. To clear just date, the user drags the date input empty (or clicks an inline × inside the picker — flatpickr supports this with `allowClear: true`).
+
+Alternative if preserving section-local Clear is desired: keep `#filter-date-clear`, ADD a matching `#filter-dist-clear` next to the Distance heading, and rename the bottom-row link "Clear all filters" so the hierarchy is explicit (section-local clears one facet, footer clears the lot).
+
+Pick one. Recommended: the second option, because removing the section-local Clear loses an affordance, while adding the missing distance Clear closes the asymmetry.
+
+**Why this addresses the findings:** the two-clear-paths confusion (I20/I24) becomes either one path (option 1) or a clearly-tiered two paths (option 2).
+
+### Observations (no proposal)
+
+These findings are real but the right fix is a judgement call — likely product/design decisions, not implementation tweaks.
+
+- **D10** — Settings drawer slides from the left, covering the toolbar. P10 + P11 reshape the drawer's contents and add a mobile sheet, but the desktop left-vs-right anchor is itself a design call. (P1 moving the gear into the toolbar partially anchors it, but the drawer side is still a choice.)
+- **D16** — Spatial grouping inconsistency. Partly fixed by P1 (move gear into toolbar) and P12 (brand pill), but the broader "where do controls live" stance is a design philosophy decision.
+- **M9** — Frequency-vs-reachability inversion. P11 moves pills bottom-centre, but the full thumb-zone re-layout (moving the toolbar itself to the bottom on mobile, à la Google Maps) is a bigger product call.
+
+### Triage summary
+
+Total findings: **53** (D1–D20: 20; M1–M16: 16; I1–I25 distinct gap entries: 17 — I1, I2, I3, I4, I5, I7, I8, I9, I10, I11, I13, I15, I19, I22, I23, I24, I25b/e/f/g/h/i counted as one I25 gap-cluster; the gap-free entries I6, I12, I14, I16, I17, I18, I20, I21, I25a, I25c, I25d are coverage confirmations rather than findings).
+
+- **P (proposed):** 16 proposals (P1–P16) addressing 47 findings.
+- **OBS (observation only):** 3 (D10, D16-residual, M9).
+- **DEFER:** 0 — no finding requires a redesign larger than P1 + P11 cover.
+- **DUP / merged:** D2 merged into P1; D9/M11 merged into P1+P7; D13/D19/M12 merged into P5; D7/D8/M6 merged into P8; M1/M3/M4/M5/M7/M8/M13/M16 merged into P11; I22/I23 merged into P2; I25b–i merged into P9+P10.
+
+**Subsumed by P1 toolbar redesign:** D1, D2, D3, D9, D16, I3, I4, I5, M2, M11 — plus TODO.md item 1.
