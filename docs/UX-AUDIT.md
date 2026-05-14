@@ -197,7 +197,111 @@ The Pass 2 checklist expected a `run-map` brand label at bottom-left, but inspec
 
 ## Pass 1 — Mobile narrative
 
-_To be filled in Task 3._
+Auditor approached the app fresh at 390×844 (iPhone 12/13/14 portrait), no prior knowledge of the mobile layout. The console at boot was clean — same two `Password field is not contained in a form` verbose notes seen on desktop, no errors or warnings. Findings below focus on places where mobile diverges from desktop or where the smaller viewport amplifies a known issue.
+
+### M1. Activity-type pills land on top of the toolbar buttons `broken`
+
+![](img/ux-audit/mobile-boot.png)
+
+This is the single most visible mobile-only defect at boot. The vertical toolbar stack lives at x=10–44 with five buttons running from y=10 to y=278 (Zoom +, Zoom −, Polygon, Rectangle, ⟲ Reset, 🗺 Display, Filter). The Road/Trail activity pills are positioned absolutely at x=10, y=200 and y=227 — **directly on top of the 🗺 Display button (y=204–234) and overlapping the Filter button (y=248–278)**. The pills sit in the same x range (10–67) as the toolbar (10–44), so the pills physically cover two icon controls. On the boot screenshot (1) you can see the "Road" pill sitting where the Display 🗺 icon should be — the icon is not visible at all. The 56 px gutter that the spec promises between the left toolbar and the right-side rail does not exist; instead there's a 0 px gutter where left-stacked chrome collides with itself. Tapping either Road or the 🗺 button at that location is essentially a coin flip.
+
+**Observation:** Road/Trail pills are absolutely positioned on top of two toolbar buttons — the Display and Filter icons are unreachable until a pill is hidden or moved.
+
+### M2. (Same as D1, D2) ⟲ icon + missing tooltips — worse on mobile
+
+![](img/ux-audit/mobile-toolbar-vs-rail.png)
+
+On desktop (D1, D2) the ⟲ button reads as "reset view" rather than "fly to most recent" and there are no styled tooltips. On mobile the issue is amplified: there is no hover state at all — a tap commits the action. Combined with M1 (pills occluding Display and Filter), the only way to learn what any toolbar button does is to tap it and watch the map react. The OS-level `title` tooltip that rescues D2 on desktop simply doesn't exist on touch.
+
+**Observation:** Icon-only toolbar with no tooltip is bad on desktop, worse on touch where there is no hover-to-disambiguate fallback.
+
+### M3. Filter popover takes the full viewport width `friction`
+
+![](img/ux-audit/mobile-filter-open.png)
+
+The filter popover renders at x=12, y=8, width=366, height=337 — covering essentially the entire upper half of the screen (1). It is anchored to the Filter toolbar button but the button itself sits underneath the popover. There is no × close on the popover; tapping outside or hitting the Filter button again toggles it. The popover content (date presets, distance, two action buttons) does fit, but the "Filter all tracks" / "Show matches in view" pair (D4) inherits the same labels-don't-discriminate problem and now those two buttons are side-by-side at the bottom of a panel that occupies most of the screen, raising the cost of an exploratory tap.
+
+**Observation:** Filter popover behaves as a quasi-full-screen sheet without sheet affordances (no drag handle, no header, no × close).
+
+### M4. Display popover sits on top of the Filter button it didn't open from `confusing`
+
+![](img/ux-audit/mobile-display-open.png)
+
+Opening the 🗺 Display popover anchors it at x=12, y=240, width=255, height=264 — so it extends down to y=504 (well into the map). The Filter toolbar button at y=248–278 ends up underneath the popover. A user who opens Display and then wants to also open Filter has to dismiss Display first. There is again no × on the popover.
+
+**Observation:** Mobile popovers don't dodge the toolbar — they cover sibling buttons.
+
+### M5. Settings drawer covers ~92% of the viewport with no visible map underneath `friction`
+
+![](img/ux-audit/mobile-settings-open.png)
+
+On desktop (D10, D11) the drawer is a left-edge slab that covers ~25 % of the map and feels detached from its trigger. On mobile the same drawer at 359 of 390 px occupies 92 % of the viewport — basically a full-screen sheet, but again with no drag handle, no "Done" affordance, only a small × at top-right. Inside, the Click-behaviour section (D12), Thunderforest credentials, Strava OAuth, and Strava import (D11) are all stacked in a single long scroll. On a phone this means a user opening Settings to toggle "Zoom to fit matched tracks" is two finger-scrolls away from a destructive "Forget tokens" button. The Search-radius slider (D12) renders correctly but the Apply button (60 × 27 px) is below the minimum recommended touch target.
+
+**Observation:** Settings is a full-screen sheet without sheet conventions; safe and destructive controls share the same scroll, which is a bigger risk on touch where mis-taps are common.
+
+### M6. Matches panel hard-wraps against the toolbar with no breathing room
+
+![](img/ux-audit/mobile-map-click.png)
+![](img/ux-audit/mobile-matches-toolbar-overlap.png)
+
+After a map tap, the matches panel renders at x=56 (right against the toolbar at x=10–44, with a 12 px gap), y=12, width=322, height=320. That's 82 % of viewport width — fine — but the panel pushes flush against the toolbar with no margin. More importantly the matches panel header gives no count and no sort affordance (same as D7) and the table column widths squash on the smaller viewport: the title column is only ~107 px wide so most run names wrap to two or three lines (e.g. "Punk Panther Wharfedale Skyline", "Splashing around the moor in my grippy s…" gets truncated mid-word). Identical-looking link styles (D8) for two-different-destinations are still present and even more confusing when each row is now 3 lines tall.
+
+**Observation:** Matches panel docks against the toolbar with no gutter; small viewport amplifies the D7/D8 link-ambiguity issue.
+
+### M7. Strava preview carousel — dots are 6×6 px and hard to tap or even see
+
+![](img/ux-audit/mobile-preview-page1.png)
+![](img/ux-audit/mobile-preview-page2.png)
+
+Tapping a match title opens the preview below the matches panel. It is a horizontally scrolling carousel of two pages: page 1 (details, stats, "Open on Strava ↗" link) and page 2 (photo). Scroll-snap works correctly and the photo fits within the viewport on page 2. **But** the dot indicators at the bottom of the carousel are 6 × 6 px spans (1) with 6 px gap, at y=685 — they read as decoration rather than a control. They are also non-interactive: tapping a dot does not jump pages, the user must horizontal-swipe. On a 390 px viewport with the matches panel taking the top half and the carousel taking the bottom half, the user gets *two* nested vertical scroll areas (matches list, page 1 details) plus a horizontal scroll (preview pages) all interleaved — a recipe for accidental scroll-direction collisions.
+
+**Observation:** Carousel dots are 6 px static decorations, not tap targets; nested scroll regions (vertical-in-vertical-with-horizontal) on a phone is fragile.
+
+### M8. Preview pushes the matches panel into a tiny scroll port
+
+![](img/ux-audit/mobile-match-pinned.png)
+
+With the matches panel at y=12 height=320 and the preview at y=340 height=359, plus the top URL bar, basically the entire viewport is consumed by chrome. The map is no longer visible beneath the chrome — the user has lost their place. There is no resize handle to give more of the screen to either panel, and the preview is not modal so it doesn't *replace* the matches list, it stacks below it.
+
+**Observation:** When a match is pinned, the entire viewport is panels; the map (the actual subject of the app) is hidden.
+
+### M9. ⚙ Settings button is bottom-left, in the thumb hot-zone — but everything else is bottom-far `nit`
+
+![](img/ux-audit/mobile-boot.png)
+
+On a 390 × 844 phone the ⚙ button (12, 786, 40 × 42) is well placed for thumb-reach — bottom-left is one of the easiest spots to hit on a one-handed phone hold. **However**, all the controls the user actually needs (toolbar buttons, pills, filter chip) live at the *top* of the screen, in the hardest-to-reach zone. The frequency-vs-reachability is inverted: the rarely-used Settings gear is reachable, the constantly-used Zoom/Display/Filter buttons are not. The matches panel × button (340, 20, 34 × 42) and preview × (340, 349, 34 × 42) are top-right — the worst spot for a right-handed thumb.
+
+**Observation:** Critical controls live in the top-left and top-right corners — both awkward thumb zones — while the bottom of the screen is largely empty.
+
+### M10. Filter chip × is even smaller than on desktop and now also collides with toolbar `friction`
+
+![](img/ux-audit/mobile-filter-applied.png)
+
+The filter chip "2025-11-13 → 2026-05-12 ×" sits at x=100, y=8, height=26 (1). On desktop (D14) the × was already a small `<span>`; on mobile the chip's height is only 26 px and the × glyph is roughly 12 px wide pressed flush against the date text. To clear the filter the user must hit a sub-15 px target, well below Apple's 44 × 44 minimum and Google's 48 × 48. Worse, the chip sits at y=8 — the exact strip the matches panel × button also occupies (y=20, x=340) when matches are open — so the user has *two* tiny dismiss × buttons within 30 px of each other along the top edge.
+
+**Observation:** Chip × glyph is ~12 px on a touch device — well under any mobile tap-target guideline.
+
+### M11. (Same as D9) Polygon-draw default tooltip is unreadable at 390 px
+
+![](img/ux-audit/mobile-polygon-armed.png)
+
+Arming the polygon control surfaces Leaflet.draw's default tooltip "Click the first point to close this shape" at the very top of the map. The Cancel/Finish actions are crammed onto a narrow strip below the toolbar (1). On desktop (D9) this was small but legible; at 390 px it overlaps the matches/filter-chip strip and becomes essentially unreadable. The polygon button gets no active highlight, so the only signal "you are drawing" is the tiny tooltip that occupies the same strip as the filter chip.
+
+**Observation:** Polygon-arming chrome is sized for desktop and doesn't reflow at 390 px.
+
+### M12. (Same as D19) Both pills off — silent empty map, no signal
+
+![](img/ux-audit/mobile-pills-both-off.png)
+
+Same behaviour as desktop. On mobile the problem is worse because the pills are buried under the Display button (M1), so a user who *finds* the pills and turns them both off has no way of knowing why the map went blank — and no inline message appears. The empty state shows the basemap with the filter chip still visible at top (1) but no track data.
+
+**Observation:** Empty-state message that was missing on desktop is also missing on mobile, where the trigger is harder to find and harder to undo.
+
+### M13. No mobile-specific bottom bar / sheet pattern — everything is desktop-shrunk
+
+A general observation: nothing about this layout is mobile-native. There is no bottom navigation bar, no bottom sheet for matches/preview (the standard iOS Maps / Google Maps pattern), no drag handle, no swipe-to-dismiss on the preview or matches panel, no half/full sheet detents. Each surface is a desktop popover or modal scaled down. For a map app, where 99 % of the screen should be the map, the mobile experience reads as "desktop site that fits".
+
+**Observation:** Mobile chrome is desktop chrome at 390 px — no platform-native sheet/bottom-bar pattern.
 
 ---
 
