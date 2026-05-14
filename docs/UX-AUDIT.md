@@ -144,11 +144,54 @@ The URL after applying state looks like `#z=15&ll=53.91637%2C-1.79882&fds=2025-1
 
 **Observation:** Hash params are unguessable abbreviations.
 
+### D18. Hex cells at low zoom are silent — clicking does nothing visible `confusing`
+
+![](img/ux-audit/desktop-sweep-hex-cells.png)
+
+Zooming out to z≈8 swaps the per-track lines for an aggregate hex-cell layer (semi-transparent blue/teal polygons). There is no legend, no count, no key telling a user what the hex colour intensity means (run count? distance?), and **clicking a cell produces no response** — no tooltip, no popover, no count, no flyout (`desktop-sweep-hex-click.png` is indistinguishable from the no-click state). Compared with z>11 where clicking the map opens a match list, the low-zoom interaction model is silently different. A user who taps a cell expecting "show me runs in this area" gets nothing.
+
+**Observation:** Hex aggregate cells at z<11 have no legend and are not interactive — clicking is a no-op.
+
+### D19. Turning both activity pills off hides every track silently `confusing`
+
+![](img/ux-audit/desktop-sweep-pills-both-off.png)
+
+Deactivating both Road and Trail pills removes every aggregate track from the map (correct), but there is no inline notice — no banner, no "(i) All tracks hidden — re-enable Road or Trail" message, no greyed-out empty-state overlay. The basemap is the only thing left. A user who toggled both off (e.g. to compare just heatmap) sees an empty map and may assume the app broke. The spec hinted at an "All tracks hidden" notice but it isn't rendered.
+
+**Observation:** Both-pills-off state silently empties the map — no empty-state messaging.
+
+### D20. No "run-map" brand pill is rendered `nit`
+
+The Pass 2 checklist expected a `run-map` brand label at bottom-left, but inspecting the DOM shows no element with that text and no `.brand` / `.logo` node. The bottom-left contains only the ⚙ Settings button (D10/D16). Either the brand was removed at some point or it never existed in this build — there is currently no app-level identification on screen, which is a minor wayfinding gap when the page is one of many tabs.
+
+**Observation:** No visible app brand/name anywhere in the UI chrome.
+
 ---
 
 ## Desktop coverage-checklist sweep
 
-_To be filled in Task 2._
+- Zoom + control — covered by D2 (`desktop-hover-zoom-in.png`).
+- Zoom − control — covered implicitly by Pass 1 (`desktop-click-zoom-in.png`); same control family as +.
+- Polygon-draw control — covered by D9 (`desktop-polygon-armed.png`, plus `desktop-polygon-drawn.png` / `desktop-polygon-closed.png`).
+- ⟲ reset button — covered by D1 (`desktop-hover-reset.png`, `desktop-click-reset.png`).
+- 🗺 display popover (base layer / base opacity / non-matched opacity / heatmap toggle) — covered by D3 + D5 (`desktop-display-open.png`, `desktop-display-opacity.png`, `desktop-display-baseswitch.png`, `desktop-heatmap-on.png`).
+- Funnel / filter pane (date, distance, action row) — covered by D4 (`desktop-filter-open.png`, `desktop-filter-applied.png`).
+- ⚙ settings drawer — covered by D10–D12 (`desktop-settings-open.png`, `desktop-settings-strava.png`, `desktop-settings-bottom.png`).
+- ❌ Brand pill (`run-map` label, bottom-left) — not present in the DOM. Logged as **D20** (discoverability/brand gap).
+- Road / Trail pills (both on, one off) — covered by D13 (`desktop-trail-only.png`).
+- ⚠️ Road / Trail pills both off + "(i) All tracks hidden" notice — narrative did not test this; captured in `desktop-sweep-pills-both-off.png`. The "All tracks hidden" notice does **not** render — logged as **D19**.
+- Filter chip bar (date chip, distance chip, × dismiss) — covered by D14 (`desktop-filter-applied.png`, `desktop-filter-chip-removed.png`).
+- Matches panel (capped at 50 vh, × dismiss) — covered by D7 (`desktop-map-click.png`); a `#matches-close` × button confirmed in DOM at top-right of the panel.
+- Strava preview panel (× dismiss) — covered by D8 (`desktop-match-pinned.png`); a `#preview-close` × button confirmed in DOM.
+- Click → match (with click marker + radius circle) — covered by D7; click marker / radius circle visible in `desktop-map-click.png` and `desktop-sweep-click-marker.png`.
+- Polygon close × button at NE corner of the polygon — covered by `desktop-polygon-closed.png` referenced from D9.
+- ⚠️ Hex cells at low zoom (z<11) — narrative never zoomed out; captured in `desktop-sweep-hex-cells.png` and `desktop-sweep-hex-click.png`. Clicking a hex is a silent no-op — logged as **D18**.
+- Heatmap auto-hide while match is active (toggle greyed) — covered by D5 (`desktop-heatmap-vs-match.png`).
+- Esc clears selection — covered by D6 (`desktop-after-esc.png`).
+- URL reload restores state — covered by D15 (`desktop-after-reload.png`).
+- Browser back across navigation — covered by Pass 1 setup (`desktop-after-back.png`).
+
+**Summary:** 3 items needed new capture (pills-both-off, hex cells at low zoom, hex click). 3 new findings added (D18 hex-click silent / no legend; D19 both-pills-off has no notice; D20 no brand pill). 1 item (brand pill) is confirmed unreachable — it doesn't exist in this build.
 
 ---
 
