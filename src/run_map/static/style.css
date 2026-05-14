@@ -194,7 +194,6 @@ button {
   border-radius: 6px;
   cursor: pointer;
   margin: 4px 0;
-  min-height: 36px;
 }
 button:hover { background: #155a8a; }
 button.ghost {
@@ -318,7 +317,7 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
   top: 8px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 1050;
+  z-index: 900;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -333,9 +332,9 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
    button). Vertical stack so they don't crowd the chip bar. */
 #type-pills {
   position: absolute;
-  top: 200px;          /* below ⟲ + 🗺 + funnel + draw toolbar */
+  top: 300px;          /* below ⟲ + 🗺 + funnel + draw toolbar */
   left: 10px;
-  z-index: 1050;
+  z-index: 900;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
