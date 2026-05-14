@@ -361,7 +361,275 @@ On desktop Esc clears the match panel and pinned track (D6). On mobile, the mobi
 
 ## Pass 2 — Surface inventory
 
-_To be filled in Task 5._
+Each entry asks three questions from the icon/label alone before touching it: what does it *claim* to do, what does it *actually* do, and what's the gap. "No gap" entries are useful too — they confirm a control is doing its job. Where a gap exists the related D-/M- finding is cited.
+
+### I1. Zoom + control
+
+![](img/ux-audit/desktop-hover-zoom-in.png)
+
+- **Icon alone claims:** zoom in. Universal "+" — no ambiguity.
+- **Actually does:** zooms the map in by one step.
+- **Gap:** none. Standard Leaflet default control. Lacks a visible custom tooltip but the action matches the icon (icon-only tooltip issue tracked under D2).
+
+### I2. Zoom − control
+
+![](img/ux-audit/desktop-hover-zoom-in.png)
+
+- **Icon alone claims:** zoom out. Universal "−".
+- **Actually does:** zooms the map out one step.
+- **Gap:** none. Same Leaflet default; same D2 tooltip caveat.
+
+### I3. Polygon-draw control
+
+![](img/ux-audit/desktop-hover-polygon.png)
+
+- **Icon alone claims:** the first glyph (pentagon outline) reads as "draw a polygon"; the second (rectangle) reads as "draw a rectangle". Both reasonably clear to anyone who has used Leaflet.draw.
+- **Actually does:** arms the polygon (or rectangle) draw mode. Leaflet.draw shows a small floating instruction strip near the top-left of the map.
+- **Gap:** small. Icon-to-action is fine, but the **armed state** is invisible on the button itself (no active highlight); discoverability of "I am now in drawing mode" is poor. See D9, M11.
+
+### I4. ⟲ reset button
+
+![](img/ux-audit/desktop-hover-reset.png)
+
+- **Icon alone claims:** refresh / reset view. The ⟲ glyph is the universal "reload" / "undo zoom" symbol on every other web map.
+- **Actually does:** flies to the bbox of the most recent run; does NOT reset zoom or pan to an "original" view.
+- **Gap:** large. Icon implies "reset view", behaviour is "fly to newest". See D1.
+
+### I5. 🗺 display popover trigger
+
+![](img/ux-audit/desktop-hover-display.png)
+
+- **Icon alone claims:** "change map / pick basemap". Map emoji reads as a basemap picker.
+- **Actually does:** opens a popover with FOUR controls: base layer picker, base opacity, non-matched track opacity, heatmap toggle. Much broader than "basemap".
+- **Gap:** moderate. The 🗺 emoji under-promises — a user who wants to dim track lines won't guess that's behind a map icon. See D3.
+
+### I6. Funnel / filter pane trigger
+
+![](img/ux-audit/desktop-hover-filter.png)
+
+- **Icon alone claims:** filter. The funnel SVG is conventional.
+- **Actually does:** opens the filter pane (date presets + range + distance slider + action row).
+- **Gap:** none on the icon; the gap is **inside** the pane (label disambiguation between the two action buttons — see D4, I22, I23).
+
+### I7. ⚙ settings drawer trigger
+
+![](img/ux-audit/desktop-boot.png)
+
+- **Icon alone claims:** settings / preferences. Universal gear icon.
+- **Actually does:** opens a left-side drawer with library stats, click behaviour, Thunderforest credentials, Strava OAuth, and ZIP import.
+- **Gap:** moderate. The icon correctly says "settings" but the drawer is more than settings — it also hosts credentials and bulk import. The mismatch is the drawer contents (D11), not the icon. Position-vs-content also feels off (D10, D16).
+
+### I8. Brand pill
+
+- **Icon alone claims:** N/A. The Pass 2 checklist expected a `run-map` brand pill at bottom-left; nothing renders there besides the ⚙ button.
+- **Actually does:** does not exist. DOM-confirmed in D20.
+- **Gap:** absent control. Logged as **D20**.
+
+### I9. Road pill
+
+![](img/ux-audit/desktop-trail-only.png)
+
+- **Icon alone claims:** filter to Road activities. The "Road" label is plain text in a pill; reads as either a tab or a toggle.
+- **Actually does:** toggles inclusion of Road activities in the aggregate layer (independent boolean — Road and Trail can both be off or both on).
+- **Gap:** moderate. Pills look like tabs (single-select) but behave like checkboxes (multi-select). Both-off goes to silent empty map. See D13, D19, M1, M12.
+
+### I10. Trail pill
+
+![](img/ux-audit/desktop-trail-only.png)
+
+- **Icon alone claims:** filter to Trail activities. Same shape/styling as Road.
+- **Actually does:** independent boolean toggle for Trail.
+- **Gap:** same as I9 (D13). On mobile additionally collides with toolbar (M1).
+
+### I11. Filter chip — date
+
+![](img/ux-audit/desktop-filter-applied.png)
+
+- **Icon alone claims:** "you currently have this date filter applied; click × to remove". Pill format `2025-05-14 → 2026-05-12 ×` is conventional.
+- **Actually does:** displays the active date range and provides a × dismiss. Clicking the chip body does nothing — only the × glyph clears the filter.
+- **Gap:** small-moderate. Chip body is non-interactive (no "edit filter" affordance), only the × works, and the × is a non-focusable `<span>` (D14, M10).
+
+### I12. Filter chip — distance
+
+- **Icon alone claims:** by inheritance with I11, would show the active distance range and offer × dismiss.
+- **Actually does:** when a non-default distance range is set, a second chip renders in the same chip bar with the same `× ` dismiss pattern. Visually identical styling to the date chip. (No fresh capture needed — visible in the same chip-bar element as I11; the spec/code path renders both chips inline once active.)
+- **Gap:** same defects as I11 (D14): chip body inert, × is a tiny span. No additional defect specific to distance.
+
+### I13. Filter chip × dismiss
+
+![](img/ux-audit/desktop-filter-chip-removed.png)
+
+- **Icon alone claims:** "remove this filter". Universal × glyph.
+- **Actually does:** removes the chip and clears the corresponding filter from state and URL.
+- **Gap:** moderate. Action is correct; the implementation is the gap — non-focusable span, ~12 px hit target, no keyboard access. See D14, M10.
+
+### I14. Matches panel × dismiss
+
+![](img/ux-audit/desktop-map-click.png)
+
+- **Icon alone claims:** close the matches panel.
+- **Actually does:** closes the matches panel (`#matches-close` confirmed in DOM at top-right of the panel). It also clears the click marker and match polylines.
+- **Gap:** small. The × closes more than just the panel — it also clears map decoration — but a user expecting "close panel only" might be mildly surprised. Reaches into adjacent state similar to D6/I4 pattern.
+
+### I15. Strava preview × dismiss
+
+![](img/ux-audit/desktop-match-pinned.png)
+
+- **Icon alone claims:** close the preview panel.
+- **Actually does:** dismisses the preview (`#preview-close`) and the orange pinned polyline. `cll`/`mid` URL state behaviour is partial — see D6, D15.
+- **Gap:** moderate. Dismiss leaves URL state stale (D6) and reload does not restore the preview (D15).
+
+### I16. Display popover — base layer picker
+
+![](img/ux-audit/desktop-display-baseswitch.png)
+
+- **Icon alone claims:** pick the basemap.
+- **Actually does:** switches the underlying tile layer (OSM / OpenTopoMap / Thunderforest variants if credentialed).
+- **Gap:** none. Label matches action.
+
+### I17. Display popover — base opacity slider
+
+![](img/ux-audit/desktop-display-opacity.png)
+
+- **Icon alone claims:** adjust basemap opacity.
+- **Actually does:** live-updates the basemap layer opacity.
+- **Gap:** none. Live update is consistent with other sliders, label is accurate.
+
+### I18. Display popover — non-matched track opacity slider
+
+![](img/ux-audit/desktop-display-open.png)
+
+- **Icon alone claims:** opacity for non-matched (background) tracks.
+- **Actually does:** live-updates the aggregate-track opacity.
+- **Gap:** none on the slider itself. The label "non-matched" pre-supposes a user understands the matched/aggregate distinction, which a fresh user may not — minor cognitive load only.
+
+### I19. Display popover — heatmap toggle
+
+![](img/ux-audit/desktop-heatmap-vs-match.png)
+
+- **Icon alone claims:** turn the heatmap overlay on/off. Checkbox affordance is honest.
+- **Actually does:** on its own, toggles the heat layer. But when a match is active the checkbox is force-disabled with `checked=true`, no inline explanation that heatmap and matches are mutually exclusive.
+- **Gap:** large. The checkbox lies about state (says "on" while showing nothing) and becomes silently un-clickable. See D5.
+
+### I20. Filter pane — date picker
+
+![](img/ux-audit/inventory-filter-pane.png)
+
+- **Icon alone claims:** pick a date range. The three preset buttons ("Last month", "Last 6 months", "Last 12 months") and a `Pick a range…` text input are conventional.
+- **Actually does:** clicking a preset fills the range; clicking the input opens a date picker. There is a section-local "Clear" button at top-right of the Date heading.
+- **Gap:** small. Two clear paths exist (section-local "Clear" next to the heading and the "Clear all" link at the bottom of the pane) — overlapping affordances that aren't obviously different. No D-/M- finding logged for this yet; relates to D14's pattern of underspecified dismiss controls.
+
+### I21. Filter pane — distance slider
+
+![](img/ux-audit/inventory-filter-pane.png)
+
+- **Icon alone claims:** select a distance range. Range slider with `0 km – 84 km` readout and a small histogram chart above showing run-count distribution by distance bucket.
+- **Actually does:** dual-thumb slider over the distribution; live-updates the range readout.
+- **Gap:** none. The histogram-above-slider is a nice touch that *does* explain the range — one of the better controls in the app.
+
+### I22. Filter pane — `Filter all tracks` button
+
+![](img/ux-audit/desktop-filter-open.png)
+
+- **Icon alone claims:** apply the filter to all tracks. The label is bland — "filter" repeats the word from the pane title.
+- **Actually does:** narrows the aggregate map to the filter set (title-attr says "Narrow the aggregate map to this filter set").
+- **Gap:** large. Label is indistinguishable from neighbour (I23). See D4, M3.
+
+### I23. Filter pane — `Show matches in view` button
+
+![](img/ux-audit/desktop-filter-open.png)
+
+- **Icon alone claims:** show "matches" within the visible map area. The word "matches" is overloaded — it elsewhere means "tracks near a clicked point".
+- **Actually does:** renders filtered tracks within the current viewport as red match polylines. Disabled until something is active; no inline reason given.
+- **Gap:** large. Label overlaps semantically with I22 and reuses "matches" with a different meaning than the click→match flow. Disabled-state has no explanation. See D4.
+
+### I24. Filter pane — `Clear all` link
+
+![](img/ux-audit/inventory-filter-pane.png)
+
+- **Icon alone claims:** clear every filter in the pane.
+- **Actually does:** resets date + distance to defaults.
+- **Gap:** small. Action matches label; gap is the overlap with the section-local "Clear" in I20. Two clear paths, no clear (sic) rule about which to use.
+
+### I25. Settings drawer — sections
+
+#### I25a. Your library (stats)
+
+![](img/ux-audit/inventory-settings-top.png)
+
+- **Icon alone claims:** N/A — heading-only section.
+- **Actually does:** shows total run count, date range, and a per-year bar chart with Road/Trail colour legend.
+- **Gap:** small. Useful info but feels like dashboard content stuck inside a "Settings" drawer; could live elsewhere. See D11.
+
+#### I25b. Click behaviour — Search radius slider + Apply
+
+![](img/ux-audit/inventory-settings-top.png)
+
+- **Icon alone claims:** set the search radius for map-click matching, then press Apply.
+- **Actually does:** slider at 0 labelled "auto", with an Apply button. Two adjacent checkboxes below ("Lock tap to nearest track", "Zoom to fit matched tracks") update live.
+- **Gap:** large. Slider is the only control in the app needing an explicit Apply (D12); units, range, and effect of "auto" are unlabelled. Inconsistent with the live-update sliders in the Display popover.
+
+#### I25c. Click behaviour — Lock tap to nearest track
+
+![](img/ux-audit/inventory-settings-top.png)
+
+- **Icon alone claims:** when tapping the map, snap selection to the closest track.
+- **Actually does:** as advertised. Toggle is live (no Apply needed).
+- **Gap:** none on the control. Inconsistency with the sibling Search radius slider (I25b) is the only friction.
+
+#### I25d. Click behaviour — Zoom to fit matched tracks
+
+![](img/ux-audit/inventory-settings-top.png)
+
+- **Icon alone claims:** when matches appear, fit the map to them.
+- **Actually does:** as advertised. Toggle is live.
+- **Gap:** none.
+
+#### I25e. Thunderforest — API key, Save, Clear
+
+![](img/ux-audit/inventory-settings-top.png)
+
+- **Icon alone claims:** add a Thunderforest API key to unlock more basemaps. Sign-up link inline.
+- **Actually does:** Save persists the key, Clear removes it. Successful save adds the Outdoors / Landscape / OpenCycleMap options to the I16 picker.
+- **Gap:** moderate. The fact that this control LIVES in Settings rather than near the I16 base-layer picker creates a cross-drawer dependency: the user must open Settings to *enable* a Display option, then close Settings and open Display to *use* it. See D11.
+
+#### I25f. Strava API — Test connection + Credentials group
+
+![](img/ux-audit/inventory-settings-bottom.png)
+
+- **Icon alone claims:** configure Strava OAuth credentials, test them.
+- **Actually does:** Test connection button hits a backend health endpoint; Credentials fieldset holds the client-id / client-secret inputs.
+- **Gap:** moderate. Same drawer-purpose mismatch as D11 — destructive/auth controls living alongside cosmetic prefs.
+
+#### I25g. Strava API — Sync range + Sync now
+
+![](img/ux-audit/inventory-settings-bottom.png)
+
+- **Icon alone claims:** choose how far back to sync, then sync.
+- **Actually does:** combobox + button to trigger ingestion.
+- **Gap:** moderate. "Sync now" is a long-running, side-effectful action sharing the same drawer as a checkbox like I25d. Risk of mis-tap on mobile (M5).
+
+#### I25h. Strava API — Forget tokens
+
+- **Icon alone claims:** revoke / drop stored Strava tokens. Mentioned in the existing D11 capture; visible in `desktop-settings-strava.png`.
+- **Actually does:** removes the OAuth refresh/access tokens from storage.
+- **Gap:** large in context. A destructive button living next to cosmetic toggles (D11), with no confirmation visible.
+
+#### I25i. Import Strava export ZIP
+
+![](img/ux-audit/inventory-settings-bottom.png)
+
+- **Icon alone claims:** bulk-import a Strava archive ZIP.
+- **Actually does:** opens a file picker and ingests an archive into DuckDB.
+- **Gap:** moderate. Heavyweight, one-time admin action behind a "Settings" gear (D11).
+
+### Systemic patterns
+
+- **Icon language is mixed and inconsistent** — emoji (🗺, ⚙), Unicode glyphs (⟲, ×), Leaflet defaults (+, −), and SVG funnels coexist with no unifying style. Draws on I4, I5, I7, I13, I14.
+- **Dismiss / clear paths are duplicated in some places and absent in others.** The filter pane has both a section-local "Clear" and a global "Clear all" (I20, I24); the polygon overlay has no on-shape close at all (M15); chips have a × glyph that is the only path (I11, I13). No consistent rule.
+- **No consistent rule for "which container hosts which control."** Popover, drawer, and inline panel are used interchangeably: I16-I19 are in a popover, I20-I24 are in a pane, I25a-I25i are in a drawer. Cosmetic prefs and destructive admin actions share the drawer (I25b vs I25h), while a credential entry (I25e) gates a sibling control in a completely different container (I16).
+- **Several controls quietly couple to other state without communicating it.** Heatmap auto-disables when a match is active but says it's still on (I19/D5); Display popover anchors over the Filter button (M4); pills both-off silently empties the map (I9/I10/D19). The UI does the right thing for the *system* but lies to the *user*.
+- **Labels conflate "filter" and "match"** across I22, I23, I14, and the click→match flow. "Show matches" means one thing in the filter pane and another after a map click, with no glossary or wayfinding.
 
 ---
 
