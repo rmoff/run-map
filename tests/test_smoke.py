@@ -424,6 +424,16 @@ def test_type_pill_both_off_hides_tracks(page: Page, app_url):
     page.wait_for_function("() => window.__rm.aggregateOn()", timeout=8_000)
 
 
+def _first_nonzero_snap(page: Page) -> int:
+    """Return the smallest non-zero distance in the slider's snap set —
+    guaranteed to exist in the user's library, so setting the lower handle
+    to it survives snapping intact."""
+    vals = page.evaluate("() => window.__rm.distSnapValues()")
+    nz = [v for v in vals if v > 0]
+    assert nz, f"snap set has no non-zero values: {vals}"
+    return nz[0]
+
+
 def test_distance_histogram_dual_slider(page: Page, app_url):
     """The distance filter renders histogram bars and a dual-handle slider;
     moving the lower handle off zero applies a min_km filter."""
@@ -437,26 +447,67 @@ def test_distance_histogram_dual_slider(page: Page, app_url):
         "() => document.querySelectorAll('#filter-dist-hist rect').length > 0",
         timeout=4_000,
     )
-    # Move the lower slider to 5 km (we know any real library has runs ≥5 km).
+    target = _first_nonzero_snap(page)
+    # Move the lower slider to a real snap value — slider snaps to actual run
+    # distances, so an arbitrary km value would be rewritten on `input`.
     page.evaluate(
-        """
-        () => {
+        f"""
+        () => {{
             const lo = document.getElementById('filter-dist-min');
-            lo.value = '5';
-            lo.dispatchEvent(new Event('input', { bubbles: true }));
-        }
+            lo.value = '{target}';
+            lo.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        }}
         """
     )
     # Readout reflects the new lower bound.
     readout = page.locator("#filter-dist-readout").inner_text()
-    assert "5 km" in readout, readout
+    assert f"{target} km" in readout, readout
 
     with page.expect_response(
-        lambda r: "/aggregate.geojson" in r.url and "min_km=5" in r.url,
+        lambda r: "/aggregate.geojson" in r.url and f"min_km={target}" in r.url,
         timeout=10_000,
     ):
         page.click("#filter-apply")
     page.wait_for_selector("#filter-chips .chip", timeout=4_000)
+
+
+def test_distance_slider_snaps_to_actual_distances(page: Page, app_url):
+    """The slider thumbs lock onto distances that exist in the library, so an
+    intermediate raw value gets rewritten to the nearer snap point."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    page.locator('a[title="Filter"]').hover()
+    page.locator("#filter-menu").wait_for(state="visible", timeout=3_000)
+    page.wait_for_function(
+        "() => document.querySelectorAll('#filter-dist-hist rect').length > 0",
+        timeout=4_000,
+    )
+
+    vals = page.evaluate("() => window.__rm.distSnapValues()")
+    # Need at least two distinct snap points either side of a gap to exercise
+    # the snap. Pick the largest gap between consecutive snap values.
+    pairs = list(zip(vals, vals[1:]))
+    a, b = max(pairs, key=lambda ab: ab[1] - ab[0])
+    if b - a < 2:
+        # Library is too dense for a meaningful snap test; nothing to assert.
+        return
+    midpoint_biased_low = a + (b - a) // 3  # closer to `a` than to `b`
+
+    snapped = page.evaluate(
+        f"""
+        () => {{
+            const lo = document.getElementById('filter-dist-min');
+            lo.value = '{midpoint_biased_low}';
+            lo.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            return Number(lo.value);
+        }}
+        """
+    )
+    assert snapped == a, (
+        f"expected snap from {midpoint_biased_low} to {a} (snap set "
+        f"around the gap: ...{a}, {b}...), got {snapped}"
+    )
 
 
 def test_show_as_matches_disabled_when_no_filters(page: Page, app_url):
@@ -482,14 +533,16 @@ def test_show_as_matches_renders_filtered_set(page: Page, app_url):
         "() => document.querySelectorAll('#filter-dist-hist rect').length > 0",
         timeout=4_000,
     )
-    # Move lower slider to 5 km to make at least one filter active.
+    # Move lower slider to the smallest non-zero snap point — slider snaps to
+    # actual run distances, so any other value would be rewritten on `input`.
+    target = _first_nonzero_snap(page)
     page.evaluate(
-        """
-        () => {
+        f"""
+        () => {{
             const lo = document.getElementById('filter-dist-min');
-            lo.value = '5';
-            lo.dispatchEvent(new Event('input', { bubbles: true }));
-        }
+            lo.value = '{target}';
+            lo.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        }}
         """
     )
     expect(page.locator("#filter-show-matches")).to_be_enabled()
@@ -521,12 +574,13 @@ def test_pill_toggle_refreshes_filter_matches(page: Page, app_url):
         "() => document.querySelectorAll('#filter-dist-hist rect').length > 0",
         timeout=4_000,
     )
+    target = _first_nonzero_snap(page)
     page.evaluate(
-        """() => {
+        f"""() => {{
             const lo = document.getElementById('filter-dist-min');
-            lo.value = '5';
-            lo.dispatchEvent(new Event('input', { bubbles: true }));
-        }"""
+            lo.value = '{target}';
+            lo.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        }}"""
     )
     with page.expect_response(
         lambda r: "/match/polygon" in r.url and r.status == 200,

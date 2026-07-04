@@ -24,6 +24,7 @@ window.__rm = {
   aggregateOn: () => !!activeAggLod && !!aggregateLayers[activeAggLod] && map.hasLayer(aggregateLayers[activeAggLod]),
   aggregateLod: () => activeAggLod,
   snapSegmentsLoaded: () => aggregateSegments.length,
+  distSnapValues: () => _distSnapValues.slice(),
   get indexById() { return indexById; },
 };
 
@@ -1992,6 +1993,11 @@ function _ensureDatePicker() {
 // the histogram is recomputed from indexById on each open so it stays in sync
 // with whatever activities the rest of the filter set has loaded.
 let _distMaxKm = 100;
+// Sorted unique distances (km, rounded) present in the cascade-filtered set,
+// always including 0 and _distMaxKm so both ends remain reachable. The slider
+// thumbs snap onto these on every `input`, so every notch corresponds to at
+// least one real run instead of leaving dead 1-km positions in sparse regions.
+let _distSnapValues = [0, 100];
 let _distWiredHandlers = false;
 
 function _activityDistancesKm() {
@@ -2019,6 +2025,10 @@ function _renderDistanceHistogram() {
   // distribution.
   const maxObserved = dists.length ? Math.max(...dists) : 10;
   _distMaxKm = Math.max(1, Math.ceil(maxObserved));
+
+  const snapSet = new Set([0, _distMaxKm]);
+  for (const d of dists) snapSet.add(Math.round(d));
+  _distSnapValues = Array.from(snapSet).sort((a, b) => a - b);
 
   const minR = document.getElementById('filter-dist-min');
   const maxR = document.getElementById('filter-dist-max');
@@ -2060,14 +2070,27 @@ function _renderDistanceHistogram() {
   _updateDistTrack();
 }
 
+function _snapDist(v) {
+  const arr = _distSnapValues;
+  if (!arr.length) return v;
+  let best = arr[0], bestD = Math.abs(v - best);
+  for (let i = 1; i < arr.length; i++) {
+    const d = Math.abs(v - arr[i]);
+    if (d < bestD) { best = arr[i]; bestD = d; }
+  }
+  return best;
+}
+
 function _updateDistTrack() {
   const minR = document.getElementById('filter-dist-min');
   const maxR = document.getElementById('filter-dist-max');
   const track = document.getElementById('filter-dist-track');
   const readout = document.getElementById('filter-dist-readout');
   if (!minR || !maxR || !track) return;
-  let lo = Number(minR.value);
-  let hi = Number(maxR.value);
+  let lo = _snapDist(Number(minR.value));
+  let hi = _snapDist(Number(maxR.value));
+  minR.value = String(lo);
+  maxR.value = String(hi);
   if (lo > hi) {
     // Snap the handle the user is dragging: which one is furthest from a
     // valid position?
