@@ -365,6 +365,47 @@ def test_index_filters_by_type(app_client):
     assert {a["id"] for a in road["activities"]} == {1}
 
 
+def test_index_filters_by_multiple_types(app_client):
+    """`type=` accepts a comma-separated list (two of three pills on)."""
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, type_="Run")
+    _seed(conn, id=2, type_="TrailRun",
+          coords=[(2.0, 48.0), (2.002, 48.001)])
+    _seed(conn, id=3, type_="Hike",
+          coords=[(3.0, 47.0), (3.002, 47.001)])
+
+    both = client.get("/index.json?type=Run,Hike").json()
+    assert {a["id"] for a in both["activities"]} == {1, 3}
+
+    # Order-insensitive.
+    rev = client.get("/index.json?type=Hike,Run").json()
+    assert {a["id"] for a in rev["activities"]} == {1, 3}
+
+
+def test_filter_clause_multi_type_sig_deterministic(app_client):
+    """Comma-list order must not change the WHERE clause or the cache sig,
+    and single-value sigs must stay plain strings (existing cache entries
+    remain valid)."""
+    *_, api_mod = app_client
+    a = api_mod._filter_clause(type="TrailRun,Run")
+    b = api_mod._filter_clause(type="Run,TrailRun")
+    assert a == b
+
+    where, params, sig = api_mod._filter_clause(type="Run")
+    assert sig["type"] == "Run"
+    assert where == ["type = ?"] and params == ["Run"]
+
+
+def test_index_unknown_type_returns_empty(app_client):
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, type_="Run")
+    r = client.get("/index.json?type=Bicycle")
+    assert r.status_code == 200
+    assert r.json() == {"activities": []}
+
+
 def test_match_filters_by_distance(app_client):
     client, db_mod, _ = app_client
     conn = db_mod.connect()
@@ -398,11 +439,35 @@ def test_filter_options_endpoint(app_client):
     _seed(conn, id=2, type_="TrailRun", start="2025-06-01T08:00:00",
           coords=[(2.0, 48.0), (2.002, 48.001)])
 
+    _seed(conn, id=3, type_="Hike", start="2025-07-01T08:00:00",
+          coords=[(3.0, 47.0), (3.002, 47.001)])
+
     r = client.get("/filter-options")
     j = r.json()
     assert j["min_date"] == "2024-06-01"
-    assert j["max_date"] == "2025-06-01"
-    assert set(j["types"]) == {"Run", "TrailRun"}
+    assert j["max_date"] == "2025-07-01"
+    assert set(j["types"]) == {"Run", "TrailRun", "Hike"}
+
+
+def test_stats_counts_three_type_buckets(app_client):
+    """/stats yearly rows carry road/trail/hike; unknown legacy types keep
+    counting in the road catch-all (pins today's behaviour on purpose)."""
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, type_="Run", start="2024-03-01T08:00:00")
+    _seed(conn, id=2, type_="TrailRun", start="2024-04-01T08:00:00",
+          coords=[(2.0, 48.0), (2.002, 48.001)])
+    _seed(conn, id=3, type_="Hike", start="2024-05-01T08:00:00",
+          coords=[(3.0, 47.0), (3.002, 47.001)])
+    _seed(conn, id=4, type_="Hike", start="2025-05-01T08:00:00",
+          coords=[(4.0, 46.0), (4.002, 46.001)])
+    _seed(conn, id=5, type_="Workout", start="2024-06-01T08:00:00",
+          coords=[(5.0, 45.0), (5.002, 45.001)])
+
+    j = client.get("/stats").json()
+    by_year = {y["year"]: y for y in j["yearly"]}
+    assert by_year[2024] == {"year": 2024, "trail": 1, "hike": 1, "road": 2}
+    assert by_year[2025] == {"year": 2025, "trail": 0, "hike": 1, "road": 0}
 
 
 # ---- Disk cache ----------------------------------------------------------

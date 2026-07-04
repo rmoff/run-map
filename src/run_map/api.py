@@ -19,7 +19,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import db, ingest_bulk, ingest_strava
+from . import activity_types, db, ingest_bulk, ingest_strava
 
 app = FastAPI(title="run-map")
 app.add_middleware(GZipMiddleware, minimum_size=512)
@@ -102,9 +102,19 @@ def _filter_clause(
         params.append(de)
         sig["date_end"] = de
     if type:
-        where.append("type = ?")
-        params.append(type)
-        sig["type"] = type
+        # Comma-separated list ("two of three pills on"). Sorted so param
+        # order can't change the WHERE clause or the cache sig; a lone value
+        # keeps the exact sig it had before multi-type existed, so old cache
+        # entries stay valid.
+        types = sorted({t.strip() for t in type.split(",") if t.strip()})
+        if len(types) == 1:
+            where.append("type = ?")
+            params.append(types[0])
+            sig["type"] = types[0]
+        elif types:
+            where.append("type IN (" + ", ".join("?" * len(types)) + ")")
+            params.extend(types)
+            sig["type"] = types
     if min_km is not None:
         where.append("distance_m >= ?")
         params.append(min_km * 1000.0)
@@ -234,7 +244,8 @@ def stats() -> dict:
         """
         SELECT EXTRACT(year FROM start_time)::INT AS year,
                SUM(CASE WHEN type = 'TrailRun' THEN 1 ELSE 0 END) AS trail,
-               SUM(CASE WHEN type != 'TrailRun' THEN 1 ELSE 0 END) AS road
+               SUM(CASE WHEN type = 'Hike' THEN 1 ELSE 0 END) AS hike,
+               SUM(CASE WHEN type NOT IN ('TrailRun', 'Hike') THEN 1 ELSE 0 END) AS road
         FROM activities
         WHERE start_time IS NOT NULL
         GROUP BY 1 ORDER BY 1
@@ -245,8 +256,8 @@ def stats() -> dict:
         "earliest": row[1].isoformat() if row[1] else None,
         "latest": row[2].isoformat() if row[2] else None,
         "yearly": [
-            {"year": int(y), "trail": int(t or 0), "road": int(r or 0)}
-            for y, t, r in yearly
+            {"year": int(y), "trail": int(t or 0), "hike": int(h or 0), "road": int(r or 0)}
+            for y, t, h, r in yearly
         ],
     }
 
@@ -782,9 +793,10 @@ def activity_details(activity_id: int) -> dict:
 
 @app.post("/strava/fix-types")
 def strava_fix_types() -> dict:
-    """Backfill the `type` column from Strava's `sport_type`. Cheap — only
-    paginated summary calls (no streams), so a full backfill takes ~9 API
-    calls for ~1700 activities."""
+    """Backfill the `type` column from Strava's `sport_type` (Walk stored
+    as its canonical "Hike"). Only UPDATEs rows already in the DB — it never
+    imports new activities. Cheap — only paginated summary calls (no
+    streams), so a full backfill takes ~9 API calls for ~1700 activities."""
     import httpx as _hx
     cfg = ingest_strava.load_config()
     tokens = ingest_strava.load_tokens()
@@ -810,9 +822,10 @@ def strava_fix_types() -> dict:
                 break
             for a in chunk:
                 examined += 1
-                t = ingest_strava._activity_type(a)
-                if t not in ingest_strava.RUN_TYPES:
+                raw = ingest_strava._activity_type(a)
+                if raw not in activity_types.IMPORT_TYPES:
                     continue
+                t = activity_types.canonical_type(raw)
                 row = _db_fetchone("SELECT type FROM activities WHERE id = ?", [int(a["id"])])
                 if row is None:
                     continue

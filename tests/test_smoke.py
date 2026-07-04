@@ -14,7 +14,17 @@ The mobile test additionally verifies the right rail is laid out for the
 narrow viewport (full-width-ish, not the 360 px desktop column).
 """
 
+from urllib.parse import parse_qs, urlparse
+
 from playwright.sync_api import Page, expect
+
+
+def _type_param(url: str) -> str | None:
+    """Decoded `type` query param of a request URL. Exact comparison only —
+    substring checks like `"type=TrailRun" in url` silently match the
+    URL-encoded comma form `type=TrailRun%2CHike`."""
+    vals = parse_qs(urlparse(url).query).get("type")
+    return vals[0] if vals else None
 
 
 def _seed_map(page: Page, app_url: str):
@@ -376,48 +386,102 @@ def test_filter_date_clear_button(page: Page, app_url):
     assert cleared == "", f"expected cleared date, got {cleared!r}"
 
 
+def test_three_type_pills_render(page: Page, app_url):
+    """Road, Trail, and Hike pills all render and start active, with no
+    redundant filter chips."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    for t in ("Run", "TrailRun", "Hike"):
+        expect(page.locator(f'#type-pills [data-type="{t}"]')).to_have_class("type-pill active")
+    assert page.evaluate("() => document.querySelectorAll('#filter-chips .chip').length") == 0
+
+
 def test_type_pill_filter(page: Page, app_url):
-    """Clicking the Road pill deactivates it, scoping to Trail. The network
-    request carries the type query param. No chip — the pill itself shows
-    the active type."""
+    """Clicking the Road pill deactivates it, scoping to Trail + Hike. The
+    network request carries the comma-list type query param. No chip — the
+    pills themselves show the active types."""
     page.set_viewport_size({"width": 1280, "height": 800})
     _seed_map(page, app_url)
 
     # Pills are always visible in the top filter bar — no need to open the pane.
     road = page.locator('#type-pills [data-type="Run"]')
     trail = page.locator('#type-pills [data-type="TrailRun"]')
+    hike = page.locator('#type-pills [data-type="Hike"]')
     expect(road).to_have_class("type-pill active")
     expect(trail).to_have_class("type-pill active")
+    expect(hike).to_have_class("type-pill active")
 
     with page.expect_response(
-        lambda r: "/aggregate.geojson" in r.url and "type=TrailRun" in r.url,
+        lambda r: "/aggregate.geojson" in r.url and _type_param(r.url) == "TrailRun,Hike",
         timeout=10_000,
     ):
         road.click()
 
     expect(road).not_to_have_class("type-pill active")
     expect(trail).to_have_class("type-pill active")
+    expect(hike).to_have_class("type-pill active")
     # No redundant type chip — pills are the source of truth.
     assert page.evaluate("() => document.querySelectorAll('#filter-chips .chip').length") == 0
 
 
-def test_type_pill_both_off_hides_tracks(page: Page, app_url):
-    """Turning both pills off shows the 'All tracks hidden' notice and
+def test_hike_only_pill_state(page: Page, app_url):
+    """Turning Road and Trail off scopes requests to type=Hike and records
+    it in the URL hash. (Doesn't assert tracks render — the library may
+    contain no hikes.)"""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    page.locator('#type-pills [data-type="Run"]').click()
+    with page.expect_response(
+        lambda r: "/aggregate.geojson" in r.url and _type_param(r.url) == "Hike",
+        timeout=10_000,
+    ):
+        page.locator('#type-pills [data-type="TrailRun"]').click()
+
+    expect(page.locator('#type-pills [data-type="Hike"]')).to_have_class("type-pill active")
+    page.wait_for_function("() => location.hash.includes('ftype=Hike')", timeout=4_000)
+
+
+def test_url_hash_restores_multi_type_pills(page: Page, app_url):
+    """Loading a URL whose hash carries a comma-list ftype restores the
+    matching pill states."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    # app_url already carries a saved-view hash — extend it rather than
+    # appending a second '#'.
+    page.goto(app_url + "&ftype=TrailRun%2CHike", wait_until="domcontentloaded")
+    # Same readiness signal as _seed_map: once the aggregate is on the map,
+    # applyURLState has finished (and with it the pill sync).
+    page.wait_for_function(
+        "() => window.__rm && window.__rm.aggregateOn && window.__rm.aggregateOn()",
+        timeout=20_000,
+    )
+
+    expect(page.locator('#type-pills [data-type="Run"]')).not_to_have_class("type-pill active")
+    expect(page.locator('#type-pills [data-type="TrailRun"]')).to_have_class("type-pill active")
+    expect(page.locator('#type-pills [data-type="Hike"]')).to_have_class("type-pill active")
+
+
+def test_type_pill_all_off_hides_tracks(page: Page, app_url):
+    """Turning all three pills off shows the 'All tracks hidden' notice and
     removes the aggregate layer; turning one back on restores it."""
     page.set_viewport_size({"width": 1280, "height": 800})
     _seed_map(page, app_url)
 
     road = page.locator('#type-pills [data-type="Run"]')
     trail = page.locator('#type-pills [data-type="TrailRun"]')
+    hike = page.locator('#type-pills [data-type="Hike"]')
     notice = page.locator('#type-empty-notice')
 
     road.click()
     trail.click()
+    hike.click()
     expect(road).not_to_have_class("type-pill active")
     expect(trail).not_to_have_class("type-pill active")
+    expect(hike).not_to_have_class("type-pill active")
     expect(notice).to_be_visible()
     assert not page.evaluate("() => window.__rm.aggregateOn()"), \
-        "aggregate should be off the map with both pills off"
+        "aggregate should be off the map with all pills off"
 
     road.click()
     expect(notice).to_be_hidden()
@@ -589,7 +653,7 @@ def test_pill_toggle_refreshes_filter_matches(page: Page, app_url):
         page.click("#filter-show-matches")
     page.wait_for_function("() => window.__rm.matchCount() > 0", timeout=10_000)
 
-    # Toggle Road off — expect a fresh /match/polygon with type=TrailRun.
+    # Toggle Road off — expect a fresh /match/polygon with type=TrailRun,Hike.
     with page.expect_response(
         lambda r: "/match/polygon" in r.url and r.status == 200,
         timeout=15_000,

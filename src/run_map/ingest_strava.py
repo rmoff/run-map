@@ -17,6 +17,7 @@ from pathlib import Path
 import httpx
 
 from . import db
+from .activity_types import IMPORT_TYPES, canonical_type, passes_import_gate
 from .parsers import points_to_linestring_wkt
 
 
@@ -26,7 +27,6 @@ class DailyRateLimit(Exception):
 TOKEN_FILE = Path(".strava_tokens.json")
 CONFIG_FILE = Path(".strava_config.json")
 API = "https://www.strava.com/api/v3"
-RUN_TYPES = {"Run", "TrailRun"}
 
 
 def _activity_type(a: dict) -> str:
@@ -226,8 +226,13 @@ def sync_with_tokens(
             _report("processing", 0, total, f"Found {total} activities to consider")
 
             for i, a in enumerate(activities, start=1):
-                a_type = _activity_type(a)
-                if a_type not in RUN_TYPES:
+                raw_type = _activity_type(a)
+                a_type = canonical_type(raw_type)
+                # Type + distance gates use the summary payload only, so a
+                # rejected activity never costs a stream API call.
+                if raw_type not in IMPORT_TYPES or not passes_import_gate(
+                    a_type, float(a.get("distance") or 0.0)
+                ):
                     skipped += 1
                     _report("processing", i, total)
                     continue

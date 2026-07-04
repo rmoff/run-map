@@ -123,6 +123,7 @@ body {
 .ti { display: inline-block; vertical-align: middle; }
 .ti.road  { color: #1f77b4; }
 .ti.trail { color: #16a34a; }
+.ti.hike  { color: #d97706; }
 .matches-table td.date { font-variant-numeric: tabular-nums; color: #555; white-space: nowrap; }
 .matches-table td.dist { text-align: right; font-variant-numeric: tabular-nums; color: #555; white-space: nowrap; }
 .matches-table td.name { color: #888; font-size: .8rem; }

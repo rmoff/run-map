@@ -343,7 +343,7 @@ let prePinView = null;          // map view saved when a track is pinned
 let activeFilters = {
   date_start: null,  // ISO 'YYYY-MM-DD' or null
   date_end: null,    // ISO 'YYYY-MM-DD' or null
-  type: null,        // 'Run' | 'TrailRun' | null
+  type: null,        // comma-list of 'Run' | 'TrailRun' | 'Hike'; null = all
   min_km: null,      // numbers; null = no bound
   max_km: null,
 };
@@ -895,14 +895,25 @@ function buildMatchLayers(matches) {
   }
 }
 
-// Strava's own activity icons (Run / TrailRun), inlined.
+// Strava's own activity icons (Run / TrailRun) plus a hiker for Hike/Walk, inlined.
 const ICON_ROAD = `<svg class="ti road" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><title>Road run</title><path fill="currentColor" d="M8.688 0C8.025 0 7.38.215 6.85.613l-3.32 2.49-2.845.948A1 1 0 000 5c0 1.579.197 2.772.567 3.734.376.978.907 1.654 1.476 2.223.305.305.6.567.886.82.785.697 1.5 1.33 2.159 2.634 1.032 2.57 2.37 4.748 4.446 6.27C11.629 22.218 14.356 23 18 23c2.128 0 3.587-.553 4.549-1.411a4.378 4.378 0 001.408-2.628c.152-.987-.389-1.787-.967-2.25l-3.892-3.114a1 1 0 01-.329-.477l-3.094-9.726A2 2 0 0013.769 2h-1.436a2 2 0 00-1.2.4l-.57.428-.516-1.803A1.413 1.413 0 008.688 0zM8.05 2.213c.069-.051.143-.094.221-.127l1.168 4.086L12.333 4h1.436l.954 3H12v2h3.36l.318 1H13v2h3.314l.55 1.726a3 3 0 00.984 1.433l3.106 2.485c-.77.19-1.778.356-2.954.356-1.97 0-3.178-.431-4.046-1.087-.895-.677-1.546-1.675-2.251-3.056-.224-.437-.45-.907-.688-1.403C9.875 10.08 8.444 7.1 5.531 4.102zM3.743 5.14c2.902 2.858 4.254 5.664 5.441 8.126.25.517.49 1.018.738 1.502.732 1.432 1.55 2.777 2.827 3.74C14.053 19.495 15.72 20 18 20c1.492 0 2.754-.23 3.684-.479a2.285 2.285 0 01-.467.575c-.5.446-1.435.904-3.217.904-3.356 0-5.629-.718-7.284-1.931-1.663-1.22-2.823-3.028-3.788-5.44a1.012 1.012 0 00-.034-.076c-.853-1.708-1.947-2.673-2.79-3.417a14.61 14.61 0 01-.647-.593c-.431-.431-.775-.88-1.024-1.527-.21-.545-.367-1.271-.417-2.3z"/></svg>`;
 const ICON_TRAIL = `<svg class="ti trail" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><title>Trail run</title><path fill="currentColor" d="M8.688 0C8.025 0 7.38.215 6.85.613l-3.32 2.49-2.845.948A1 1 0 000 5c0 1.579.197 2.772.567 3.734.376.978.907 1.654 1.476 2.223.305.305.6.567.886.82.785.697 1.5 1.33 2.159 2.634 1.032 2.57 2.37 4.748 4.446 6.27.15.11.303.217.46.319h-2.58l-2.707-2.707a1 1 0 00-1.414 0L3 18.586l-1.5-1.5L.086 18.5l2.207 2.207a1 1 0 001.414 0L4 20.414l2.293 2.293A1 1 0 007 23h11c2.128 0 3.587-.553 4.549-1.411a4.378 4.378 0 001.408-2.628c.152-.987-.389-1.787-.967-2.25l-3.892-3.114a1 1 0 01-.329-.477l-3.094-9.726A2 2 0 0013.769 2h-1.436a2 2 0 00-1.2.4l-.57.428-.516-1.803A1.413 1.413 0 008.688 0zM18 21c-3.356 0-5.629-.718-7.284-1.931-1.663-1.22-2.823-3.028-3.788-5.44a1.012 1.012 0 00-.034-.076c-.853-1.708-1.947-2.673-2.79-3.417-.24-.212-.46-.405-.647-.593-.431-.431-.775-.88-1.024-1.527-.21-.545-.367-1.271-.417-2.3l1.323-.442L5 7.351v1.706l.333.299c1.11.992 2.452 2.512 3.933 4.839 1.356 2.132 3.156 3.553 5.26 4.685l.222.12h7.156c-.105.36-.307.758-.687 1.096-.5.446-1.435.904-3.217.904zM5.175 4.368L8.05 2.213c.069-.051.143-.094.221-.127l1.168 4.086L12.333 4h1.436l.954 3H10v1.934l3.11 3.391-.724 1.014L13.454 15h4.21c.06.055.12.108.184.16L20.15 17h-4.893c-1.793-.996-3.223-2.182-4.303-3.88C9.526 10.88 8.188 9.295 7 8.172V6.65zM15.36 9l.039.122-1.1 1.54L12.774 9zm.796 2.502L16.632 13h-1.546z"/></svg>`;
 
+const ICON_HIKE = `<svg class="ti hike" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><title>Hike</title><path fill="currentColor" d="M13.5 5.5c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zM17.5 10.78c-1.23-.37-2.22-1.17-2.8-2.18l-1-1.6c-.41-.65-1.11-1-1.84-1-.78 0-1.59.5-1.78 1.44S7 23 7 23h2.1l1.8-8 2.1 2v6h2v-7.5l-2.1-2 .6-3c1 1.15 2.41 2.01 4 2.34V23H19V9h-1.5v1.78zM7.43 13.13l-2.12-.41c-.54-.11-1.07.25-1.18.79l-.12.59c-.11.54.25 1.07.79 1.18l2.12.41c.54.11 1.07-.25 1.18-.79l.12-.59c.1-.55-.26-1.07-.79-1.18z"/></svg>`;
+
+// The registry every type-aware surface reads from: pills, match-row icons,
+// tooltips, and the stats chart. Order here is the canonical UI order used
+// when serialising a comma-list type filter.
+const TYPE_DEFS = [
+  { type: 'Run',      label: 'Road',  color: '#1f77b4', icon: ICON_ROAD },
+  { type: 'TrailRun', label: 'Trail', color: '#16a34a', icon: ICON_TRAIL },
+  { type: 'Hike',     label: 'Hike',  color: '#d97706', icon: ICON_HIKE },
+];
+const ALL_TYPES = TYPE_DEFS.map(d => d.type);
+
 function typeIcon(type) {
-  if (type === 'TrailRun') return ICON_TRAIL;
-  if (type === 'Run')      return ICON_ROAD;
-  return '';
+  const def = TYPE_DEFS.find(d => d.type === type);
+  return def ? def.icon : '';
 }
 
 function rowHtml(m) {
@@ -1860,13 +1871,13 @@ function _draftOtherFilters() {
     date_start = ymd(fp.selectedDates[0]);
     date_end   = ymd(fp.selectedDates[1]);
   }
-  // Type is now driven by the always-visible Road/Trail pills — they write
+  // Type is now driven by the always-visible type pills — they write
   // straight into activeFilters.type, so the draft view just reads from there.
   return { date_start, date_end, type: activeFilters.type };
 }
 
 function _activityMatchesOtherFilters(a, f) {
-  if (f.type && a.type !== f.type) return false;
+  if (f.type && !f.type.split(',').includes(a.type)) return false;
   if (f.date_start || f.date_end) {
     if (!a.start_time) return false;
     const d = a.start_time.slice(0, 10);
@@ -1890,7 +1901,7 @@ function renderFilterChips() {
   const chips = [];
   const dateLabel = _fmtDateChip();
   if (dateLabel) chips.push({ key: 'date', label: dateLabel });
-  // Type is now carried by the always-visible Road/Trail pills — no chip.
+  // Type is now carried by the always-visible type pills — no chip.
   if (activeFilters.min_km != null || activeFilters.max_km != null) {
     const lo = activeFilters.min_km != null ? `≥${activeFilters.min_km}` : '';
     const hi = activeFilters.max_km != null ? `<${activeFilters.max_km}` : '';
@@ -2179,7 +2190,7 @@ function _readFilterDraft() {
     activeFilters.date_start = null;
     activeFilters.date_end   = null;
   }
-  // Type is owned by the always-visible Road/Trail pills — they write
+  // Type is owned by the always-visible type pills — they write
   // activeFilters.type directly, so nothing to read here.
 
   const lo = Number(document.getElementById('filter-dist-min').value);
@@ -2294,38 +2305,36 @@ document.getElementById('filter-clear').addEventListener('click', () => {
   applyFilters();
 });
 
-// ---- Road / Trail pills --------------------------------------------------
+// ---- Road / Trail / Hike pills -------------------------------------------
 //
 // Always-visible pills in the top filter-bar drive `activeFilters.type` directly.
-// Semantics: both on = no filter (default); exactly one on = filter to that
-// type. The handler forbids both-off — clicking the lit pill snaps the other
-// one back on, so the user always has at least one type active.
+// Semantics: all on = no filter (default); a subset on = comma-list filter of
+// those types (canonical ALL_TYPES order, so shared URLs are stable).
 
-// activeFilters.type carries the standard backend filter ('Run' | 'TrailRun' | null).
-// "both off" is a client-side-only state: aggregate + matches are hidden and a
+// activeFilters.type carries the standard backend filter (comma-list or null).
+// "all off" is a client-side-only state: aggregate + matches are hidden and a
 // notice surfaces. The backend never sees a request in that state, so the model
 // stays in sync with the (i) banner.
 let _allTypesOff = false;
 
+function typesFromFilter() {
+  return activeFilters.type ? activeFilters.type.split(',') : ALL_TYPES.slice();
+}
+
+function setTypeFilter(on) {  // on: Set of type strings, never empty
+  activeFilters.type = on.size >= ALL_TYPES.length
+    ? null
+    : ALL_TYPES.filter(t => on.has(t)).join(',');
+}
+
 function _syncTypePills() {
-  const road = document.querySelector('#type-pills [data-type="Run"]');
-  const trail = document.querySelector('#type-pills [data-type="TrailRun"]');
   const notice = document.getElementById('type-empty-notice');
-  if (!road || !trail) return;
-  let roadOn, trailOn;
-  if (_allTypesOff) {
-    roadOn = false; trailOn = false;
-  } else if (activeFilters.type === 'Run') {
-    roadOn = true; trailOn = false;
-  } else if (activeFilters.type === 'TrailRun') {
-    roadOn = false; trailOn = true;
-  } else {
-    roadOn = true; trailOn = true;
+  const on = _allTypesOff ? new Set() : new Set(typesFromFilter());
+  for (const pill of document.querySelectorAll('#type-pills .type-pill')) {
+    const isOn = on.has(pill.dataset.type);
+    pill.classList.toggle('active', isOn);
+    pill.setAttribute('aria-pressed', isOn ? 'true' : 'false');
   }
-  road.classList.toggle('active', roadOn);
-  road.setAttribute('aria-pressed', roadOn ? 'true' : 'false');
-  trail.classList.toggle('active', trailOn);
-  trail.setAttribute('aria-pressed', trailOn ? 'true' : 'false');
   if (notice) notice.classList.toggle('hidden', !_allTypesOff);
 }
 
@@ -2341,16 +2350,10 @@ function _hideAllTracks() {
 for (const pill of document.querySelectorAll('#type-pills .type-pill')) {
   pill.addEventListener('click', () => {
     const me = pill.dataset.type;
-    const other = me === 'Run' ? 'TrailRun' : 'Run';
-    // Resolve current "on" state from activeFilters + _allTypesOff.
-    let meOn, otherOn;
-    if (_allTypesOff) { meOn = false; otherOn = false; }
-    else if (activeFilters.type === me)    { meOn = true;  otherOn = false; }
-    else if (activeFilters.type === other) { meOn = false; otherOn = true;  }
-    else                                    { meOn = true;  otherOn = true;  }
+    const on = _allTypesOff ? new Set() : new Set(typesFromFilter());
+    if (on.has(me)) on.delete(me); else on.add(me);
 
-    const newMeOn = !meOn;
-    if (!newMeOn && !otherOn) {
+    if (on.size === 0) {
       _allTypesOff = true;
       activeFilters.type = null;
       _syncTypePills();
@@ -2360,9 +2363,7 @@ for (const pill of document.querySelectorAll('#type-pills .type-pill')) {
       return;
     }
     _allTypesOff = false;
-    activeFilters.type = (newMeOn && otherOn) ? null
-                       : newMeOn ? me
-                       : other;
+    setTypeFilter(on);
     _syncTypePills();
     if (!document.getElementById('filter-menu').classList.contains('hidden')) {
       _renderDistanceHistogram();
@@ -2457,26 +2458,28 @@ function renderYearChart(yearly) {
   const byYear = new Map(yearly.map(y => [y.year, y]));
   const series = [];
   for (let y = minY; y <= maxY; y++) {
-    series.push(byYear.get(y) || { year: y, road: 0, trail: 0 });
+    series.push(byYear.get(y) || { year: y, road: 0, trail: 0, hike: 0 });
   }
 
   const w = 300, h = 80, pad = 18;
   const barW = (w - 4) / series.length;
-  const max = Math.max(...series.map(s => (s.road || 0) + (s.trail || 0)), 1);
-  const ROAD = '#1f77b4', TRAIL = '#16a34a';
+  const max = Math.max(...series.map(s => (s.road || 0) + (s.trail || 0) + (s.hike || 0)), 1);
+  const ROAD = '#1f77b4', TRAIL = '#16a34a', HIKE = '#d97706';
   let svg = `<svg viewBox="0 0 ${w} ${h + pad}" class="year-chart" preserveAspectRatio="xMidYMid meet">`;
   series.forEach((s, i) => {
     const x = 2 + i * barW;
-    const total = (s.road || 0) + (s.trail || 0);
+    const total = (s.road || 0) + (s.trail || 0) + (s.hike || 0);
     const roadH = (s.road / max) * h;
     const trailH = (s.trail / max) * h;
-    const fullH = roadH + trailH;
+    const hikeH = ((s.hike || 0) / max) * h;
+    const fullH = roadH + trailH + hikeH;
     if (total === 0) {
       svg += `<rect class="gap" x="${x + 1}" y="${h - 1}" width="${barW - 2}" height="1"><title>${s.year}: 0</title></rect>`;
     } else {
-      // road sits at the base, trail stacks on top
+      // road sits at the base, trail stacks on top, hike above that
       svg += `<rect x="${x + 1}" y="${h - roadH}" width="${barW - 2}" height="${roadH}" fill="${ROAD}"><title>${s.year}: ${s.road} road</title></rect>`;
-      svg += `<rect x="${x + 1}" y="${h - fullH}" width="${barW - 2}" height="${trailH}" fill="${TRAIL}"><title>${s.year}: ${s.trail} trail</title></rect>`;
+      svg += `<rect x="${x + 1}" y="${h - roadH - trailH}" width="${barW - 2}" height="${trailH}" fill="${TRAIL}"><title>${s.year}: ${s.trail} trail</title></rect>`;
+      svg += `<rect x="${x + 1}" y="${h - fullH}" width="${barW - 2}" height="${hikeH}" fill="${HIKE}"><title>${s.year}: ${s.hike || 0} hike</title></rect>`;
       svg += `<text x="${x + barW/2}" y="${h - fullH - 2}" text-anchor="middle" font-size="9" fill="#444">${total}</text>`;
     }
     if (series.length <= 12 || i % 2 === 0) {
@@ -2487,6 +2490,7 @@ function renderYearChart(yearly) {
   svg += `<div class="chart-legend">
     <span><span class="swatch" style="background:${ROAD}"></span>Road</span>
     <span><span class="swatch" style="background:${TRAIL}"></span>Trail</span>
+    <span><span class="swatch" style="background:${HIKE}"></span>Hike</span>
   </div>`;
   return svg;
 }
@@ -2502,7 +2506,7 @@ async function loadStats() {
   const first = s.earliest ? s.earliest.slice(0, 10) : '?';
   const last = s.latest ? s.latest.slice(0, 10) : '?';
   div.innerHTML = `
-    <p class="stats-summary"><strong>${s.count}</strong> runs · ${first} → ${last}</p>
+    <p class="stats-summary"><strong>${s.count}</strong> activities · ${first} → ${last}</p>
     ${renderYearChart(s.yearly)}
   `;
 }

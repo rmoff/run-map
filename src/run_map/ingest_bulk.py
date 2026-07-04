@@ -14,9 +14,8 @@ from pathlib import Path
 import pandas as pd
 
 from . import db
+from .activity_types import IMPORT_TYPES, canonical_type, passes_import_gate
 from .parsers import parse_track_file
-
-RUN_TYPES = {"Run", "TrailRun"}
 
 
 def _find_track_file(export_dir: Path, rel_path: str) -> Path | None:
@@ -67,7 +66,7 @@ def ingest(export_dir: Path, *, progress_cb=None) -> tuple[int, int]:
     drive a progress bar. `done` is the number of rows processed so far.
     """
     df = _parse_csv(export_dir)
-    df = df[df["type"].isin(RUN_TYPES)].copy()
+    df = df[df["type"].isin(IMPORT_TYPES)].copy()
 
     total = len(df)
     inserted = 0
@@ -77,6 +76,19 @@ def ingest(export_dir: Path, *, progress_cb=None) -> tuple[int, int]:
         for done, (_, row) in enumerate(df.iterrows(), start=1):
             if progress_cb is not None:
                 progress_cb(done, total, str(row.get("name") or row.get("filename") or ""))
+            distance_raw = row.get("distance_km_or_m")
+            try:
+                distance_m = float(distance_raw)
+                # Export historically stored km; if it looks like km, convert.
+                if distance_m < 1000:
+                    distance_m *= 1000.0
+            except (TypeError, ValueError):
+                distance_m = 0.0
+            a_type = canonical_type(str(row["type"]))
+            if not passes_import_gate(a_type, distance_m):
+                skipped += 1
+                continue
+
             track_path = _find_track_file(export_dir, str(row.get("filename", "")))
             if not track_path:
                 skipped += 1
@@ -88,14 +100,6 @@ def ingest(export_dir: Path, *, progress_cb=None) -> tuple[int, int]:
 
             activity_id = int(row["id"])
             start_time = pd.to_datetime(row["start_time"], utc=True).to_pydatetime().replace(tzinfo=None)
-            distance_raw = row.get("distance_km_or_m")
-            try:
-                distance_m = float(distance_raw)
-                # Export historically stored km; if it looks like km, convert.
-                if distance_m < 1000:
-                    distance_m *= 1000.0
-            except (TypeError, ValueError):
-                distance_m = 0.0
             moving_time_s = int(row.get("moving_time_s") or 0)
 
             db.upsert_activity(
@@ -105,7 +109,7 @@ def ingest(export_dir: Path, *, progress_cb=None) -> tuple[int, int]:
                 name=str(row.get("name") or ""),
                 distance_m=distance_m,
                 moving_time_s=moving_time_s,
-                type=str(row["type"]),
+                type=a_type,
                 strava_url=f"https://www.strava.com/activities/{activity_id}",
                 source="bulk",
                 track_wkt=wkt,
@@ -125,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     started = datetime.now()
     inserted, skipped = ingest(args.export_dir)
-    print(f"Ingested {inserted} runs (skipped {skipped}) in {datetime.now() - started}")
+    print(f"Ingested {inserted} activities (skipped {skipped}) in {datetime.now() - started}")
     return 0
 
 

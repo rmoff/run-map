@@ -19,7 +19,7 @@ CREATE TABLE activities (
     name          VARCHAR,
     distance_m    DOUBLE,
     moving_time_s INTEGER,
-    type          VARCHAR,                -- Run / TrailRun (sport_type)
+    type          VARCHAR,                -- Run / TrailRun / Hike (sport_type; Walk stored as Hike)
     strava_url    VARCHAR,
     source        VARCHAR,                -- 'bulk' | 'api'
     track         GEOMETRY                -- LINESTRING WGS84
@@ -37,10 +37,12 @@ Tracks are simplified at ingest with `shapely.simplify(1e-5)` to ~1 m precision.
 
 ## Ingest paths
 
-1. **Bulk import** — read an unzipped Strava export (CSV + GPX/FIT files), filter to `Run`/`TrailRun`, upsert. Zero API cost.
+1. **Bulk import** — read an unzipped Strava export (CSV + GPX/FIT files), filter to the import set below, upsert. Zero API cost.
 2. **Incremental Strava API sync** — OAuth paste-code flow, `/athlete/activities` + per-activity `latlng` streams. Uses `sport_type` (not the legacy `type`) so TrailRun isn't collapsed into Run. Includes 429 / daily-rate-limit handling.
 
-Both paths use `INSERT … ON CONFLICT (id) DO UPDATE`, so a re-import / re-sync overwrites every field including `type`.
+**Import set** (shared vocabulary in `activity_types.py`): `Run` and `TrailRun` at any distance; `Hike` and `Walk` only when distance > 5 km. Hike and Walk are one activity type — both are stored under the canonical `type` value `Hike`. The distance gate uses the CSV distance (bulk) or the summary `distance` field (API sync, checked *before* the expensive stream fetch, so rejected activities cost no extra API calls). Hikes with no recorded distance are skipped.
+
+Both paths use `INSERT … ON CONFLICT (id) DO UPDATE`, so a re-import / re-sync overwrites every field including `type`. Note that the incremental sync resumes from `max(start_time)` — hikes older than the newest activity in the DB only appear after a "From the beginning" sync or a bulk re-import.
 
 ## HTTP API
 
@@ -70,7 +72,7 @@ Both paths use `INSERT … ON CONFLICT (id) DO UPDATE`, so a re-import / re-sync
 `/aggregate.geojson`, `/index.json`, `/heatmap.json`, `/match`, `/match/polygon` all accept the same attribute filters:
 
 - `date_start`, `date_end` — ISO `YYYY-MM-DD`, inclusive on both ends; either can be omitted for an open-ended window. Bad input → 400.
-- `type` — `Run` (road) or `TrailRun`
+- `type` — `Run` (road), `TrailRun`, or `Hike` (hikes + walks); accepts a comma-separated list (`type=Run,Hike`) which becomes a SQL `IN`. List order doesn't matter — values are sorted before hitting the WHERE clause and the cache signature.
 - `min_km`, `max_km` — distance window in km
 
 Each unique filter combo hashes to its own cache file under `data/cache/`.
@@ -83,7 +85,7 @@ DuckDB connections are **per-thread** (`threading.local`), since one connection 
 
 - **Map** fills the viewport.
 - **Top-left** (Leaflet toolbar): zoom controls, the polygon-draw control, the ⟲ reset button (fly to most recent run), the 🗺 display-controls popover (base layer, base opacity, non-matched-track opacity, heatmap overlay), and the funnel button that opens the filter pane. Both popovers open on hover and close after a short grace period when the cursor leaves both the button and the popover.
-- **Below the toolbar (left rail)**: always-visible Road / Trail pills. Click to toggle; both off shows a small "(i) All tracks hidden" notice and removes the aggregate / hex / match layers.
+- **Below the toolbar (left rail)**: always-visible Road / Trail / Hike pills. Click to toggle; all off shows a small "(i) All tracks hidden" notice and removes the aggregate / hex / match layers.
 - **Top-centre**: filter chip bar — active date and distance chips with × to remove. Type is carried by the pills, so it gets no chip.
 - **Bottom-left**: brand pill (`run-map`) and ⚙ button. Settings drawer slides from the left and now holds only data/click-behaviour controls (search radius, lock-to-track, zoom-to-fit, Strava API, ZIP import, library stats).
 - **Top-right (right rail)**: Matches panel (capped at 50 vh) above, Strava-preview panel below. Both pinned with × to dismiss. On mobile (≤700 px) the rail spans top with a 56 px gutter on the left so the Leaflet toolbar stays reachable, and the preview's stats and photo become a two-page horizontal scroll-snap carousel with dot indicators.
@@ -119,7 +121,7 @@ The heatmap is **automatically hidden while a match is active**, and the toggle 
 ### Filters & views
 
 - **Default view + reset** (⟲ button): on boot (no URL view restored) and whenever ⟲ is clicked, the map flies to the bbox of the activity with the latest `start_time` (max-zoom 16). Reset also clears the visible match polylines, matches panel, and Strava embed, but preserves the click marker on the map and the in-memory match-list emphasis so a back-button or pin click can restore the selection.
-- **Type pills** (left rail under the funnel): Road and Trail. Click toggles; both on = no type filter, exactly one on = filter to that type, both off = aggregate / hex / matches all hidden with an "(i) All tracks hidden" notice. Pills are the single source of truth for type — there is no type chip.
+- **Type pills** (left rail under the funnel): Road, Trail, and Hike (hikes + walks — one pill, one stored type). Click toggles; all on = no type filter, a subset on = comma-list filter of those types, all off = aggregate / hex / matches all hidden with an "(i) All tracks hidden" notice. Pills are the single source of truth for type — there is no type chip. The pill registry (`TYPE_DEFS` in app.js) also drives the match-row icons, tooltips, and the yearly chart colours (road `#1f77b4`, trail `#16a34a`, hike `#d97706`).
 - **Filter pane** (funnel button, hover-to-open): three sections — Date (flatpickr range picker with presets: Last month / Last 6 months / Last 12 months, with a Clear-date link), Distance (histogram-backed dual-handle slider; upper handle at the max means open-ended), and an action row with `Clear all` plus two equal-weight buttons: `Filter all tracks` (the previous Apply — narrows the aggregate to this filter set) and `Show matches in view` (renders the filtered tracks that intersect the current viewport as red match polylines via `/match/polygon` with a bbox WKT). The second button is disabled until at least one facet is set, and on click it always clears the heatmap first, regardless of toggle state. While a filter-driven match set is active, toggling a Road/Trail pill (or any other facet) re-runs the match query so the visible set stays in sync.
 - **Display popover** (🗺, hover-to-open): base layer picker (Topo / OSM / Light / CyclOSM / Satellite, plus three Thunderforest styles when an API key is saved — `Thunderforest Outdoors` / `Landscape` / `OpenCycleMap`, key stored in `localStorage.runmap.tfApiKey`, saving a key snaps the active base layer to `Thunderforest Landscape`), base opacity slider (default 50 %), non-matched-track opacity slider (default 45 %; controls the dim alpha of the aggregate beneath active matches), heatmap overlay toggle.
 - **Polygon / rectangle draw**: triggers `/match/polygon`, draws precise matched tracks, flies to the bounds of the drawn shape (always, even when matches are inside), leaves the polygon outline with a red × close button at its NE corner.
@@ -128,7 +130,7 @@ The heatmap is **automatically hidden while a match is active**, and the toggle 
 
 ### URL state
 
-The URL hash carries: zoom (`z`), centre (`ll`), polygon WKT (`poly`), lock-to-track toggle (`lock`), zoom-to-fit (`zfit`), heatmap toggle (`hm`), base layer (`base`), base opacity (`op`), search radius (`sr`), non-matched-track dim opacity (`dop`), the active filter chips (`fds`, `fde`, `ftype`, `fmin`, `fmax`), and the active click marker + emphasised match (`cll=lat,lng`, `mid=<id>`). Reload restores all of them — `applyURLState` calls `queryPoint(lat,lng)` and `currentEmphasise(mid)` after data loads, and `queryPoint` redraws the click pin + radius circle. The Thunderforest API key is **not** in the URL (it's a secret; localStorage only). Pan/zoom uses `replaceState`; intentional nav (filter change, polygon draw, hex drill-in, manual click, ⟲ reset) uses `pushState` so browser back works. Legacy hashes carrying `preset` or `fyears` are silently ignored.
+The URL hash carries: zoom (`z`), centre (`ll`), polygon WKT (`poly`), lock-to-track toggle (`lock`), zoom-to-fit (`zfit`), heatmap toggle (`hm`), base layer (`base`), base opacity (`op`), search radius (`sr`), non-matched-track dim opacity (`dop`), the active filter chips (`fds`, `fde`, `ftype` — possibly a comma list, `fmin`, `fmax`), and the active click marker + emphasised match (`cll=lat,lng`, `mid=<id>`). Reload restores all of them — `applyURLState` calls `queryPoint(lat,lng)` and `currentEmphasise(mid)` after data loads, and `queryPoint` redraws the click pin + radius circle. The Thunderforest API key is **not** in the URL (it's a secret; localStorage only). Pan/zoom uses `replaceState`; intentional nav (filter change, polygon draw, hex drill-in, manual click, ⟲ reset) uses `pushState` so browser back works. Legacy hashes carrying `preset` or `fyears` are silently ignored.
 
 ### Performance
 
