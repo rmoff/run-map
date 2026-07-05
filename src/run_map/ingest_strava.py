@@ -14,6 +14,7 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
 import httpx
 
 from . import db
@@ -235,30 +236,40 @@ def sync_with_tokens(
                     skipped += 1
                     _report("processing", i, total)
                     continue
-                stream = _get_latlng_stream(client, a["id"], on_wait=on_wait)
-                if not stream:
+                # One malformed activity (bad geometry, odd payload) must not
+                # abort a multi-thousand-activity sync — skip it and carry
+                # on. Rate limits and fatal DB errors still propagate: the
+                # first pauses the sync, and after the second nothing can
+                # continue anyway.
+                try:
+                    stream = _get_latlng_stream(client, a["id"], on_wait=on_wait)
+                    if not stream:
+                        skipped += 1
+                        _report("processing", i, total)
+                        continue
+                    wkt = points_to_linestring_wkt(stream)
+                    if not wkt:
+                        skipped += 1
+                        _report("processing", i, total)
+                        continue
+                    start_time = datetime.fromisoformat(a["start_date"].replace("Z", "+00:00")).replace(tzinfo=None)
+                    db.upsert_activity(
+                        conn,
+                        id=int(a["id"]),
+                        start_time=start_time,
+                        name=a.get("name") or "",
+                        distance_m=float(a.get("distance") or 0.0),
+                        moving_time_s=int(a.get("moving_time") or 0),
+                        type=a_type,
+                        strava_url=f"https://www.strava.com/activities/{a['id']}",
+                        source="api",
+                        track_wkt=wkt,
+                    )
+                    inserted += 1
+                except (DailyRateLimit, duckdb.FatalException):
+                    raise
+                except Exception:
                     skipped += 1
-                    _report("processing", i, total)
-                    continue
-                wkt = points_to_linestring_wkt(stream)
-                if not wkt:
-                    skipped += 1
-                    _report("processing", i, total)
-                    continue
-                start_time = datetime.fromisoformat(a["start_date"].replace("Z", "+00:00")).replace(tzinfo=None)
-                db.upsert_activity(
-                    conn,
-                    id=int(a["id"]),
-                    start_time=start_time,
-                    name=a.get("name") or "",
-                    distance_m=float(a.get("distance") or 0.0),
-                    moving_time_s=int(a.get("moving_time") or 0),
-                    type=a_type,
-                    strava_url=f"https://www.strava.com/activities/{a['id']}",
-                    source="api",
-                    track_wkt=wkt,
-                )
-                inserted += 1
                 _report("processing", i, total)
     finally:
         conn.close()

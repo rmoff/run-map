@@ -116,6 +116,45 @@ def test_bulk_ingest_survives_corrupt_rows(fresh_db, tmp_path):
     assert skipped == 1
 
 
+def test_strava_sync_survives_one_bad_activity(fresh_db, monkeypatch):
+    """A single failing upsert (bad geometry, malformed payload) must be
+    skipped and counted — not abort a 5000-activity sync. Fatal DB errors
+    still propagate: after those, nothing can continue."""
+    from run_map import db as db_mod
+    from run_map import ingest_strava
+    importlib.reload(ingest_strava)
+
+    activities = [
+        {"id": 20, "sport_type": "Run", "distance": 3000.0,
+         "start_date": "2025-01-01T08:00:00Z", "name": "ok", "moving_time": 900},
+        {"id": 21, "sport_type": "Run", "distance": 4000.0,
+         "start_date": "2025-01-02T08:00:00Z", "name": "poison", "moving_time": 900},
+        {"id": 22, "sport_type": "Run", "distance": 5000.0,
+         "start_date": "2025-01-03T08:00:00Z", "name": "also ok", "moving_time": 900},
+    ]
+    monkeypatch.setattr(ingest_strava, "_list_activities",
+                        lambda client, after_epoch, on_wait=None: activities)
+    monkeypatch.setattr(ingest_strava, "_get_latlng_stream",
+                        lambda client, aid, on_wait=None:
+                        [(53.50, -1.50), (53.502, -1.501), (53.503, -1.503)])
+
+    real_upsert = db_mod.upsert_activity
+
+    def poisoned(conn, **kw):
+        if kw["id"] == 21:
+            raise ValueError("synthetic bad geometry")
+        return real_upsert(conn, **kw)
+
+    monkeypatch.setattr(ingest_strava.db, "upsert_activity", poisoned)
+
+    inserted, skipped = ingest_strava.sync_with_tokens({"access_token": "t"})
+
+    stored = _stored_types(fresh_db)
+    assert set(stored) == {20, 22}, "activities after the bad one must still ingest"
+    assert inserted == 2
+    assert skipped == 1
+
+
 def test_strava_sync_admits_all_hikes(fresh_db, monkeypatch):
     from run_map import ingest_strava
     importlib.reload(ingest_strava)
