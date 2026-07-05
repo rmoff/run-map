@@ -102,18 +102,28 @@ _HIKE_MIN_M = float(os.environ.get("RUN_MAP_HIKE_MIN_KM", "") or
                     activity_types.HIKE_MIN_DISTANCE_M / 1000.0) * 1000.0
 
 
+def _resolve_hike_min_m(hike_min_km: float | None) -> float:
+    """Per-request override of the hike threshold; None means the server
+    default (RUN_MAP_HIKE_MIN_KM). Negative input clamps to 0 (= show all)."""
+    if hike_min_km is None:
+        return _HIKE_MIN_M
+    return max(float(hike_min_km), 0.0) * 1000.0
+
+
 def _filter_clause(
     date_start: str | None = None,
     date_end: str | None = None,
     type: str | None = None,
     min_km: float | None = None,
     max_km: float | None = None,
+    hike_min_km: float | None = None,
 ) -> tuple[list[str], list, dict]:
     # Baseline gate on every map/match query: short hikes are stored (so the
     # threshold can change without a re-sync) but never served.
+    hike_min_m = _resolve_hike_min_m(hike_min_km)
     where: list[str] = ["NOT (type = ? AND distance_m < ?)"]
-    params: list = [activity_types.CANONICAL_HIKE, _HIKE_MIN_M]
-    sig: dict = {"hike_min_m": _HIKE_MIN_M}
+    params: list = [activity_types.CANONICAL_HIKE, hike_min_m]
+    sig: dict = {"hike_min_m": hike_min_m}
     if date_start:
         ds = _parse_iso_date(date_start, "date_start")
         where.append("start_time::DATE >= ?")
@@ -261,12 +271,13 @@ def count() -> dict:
 
 
 @app.get("/stats")
-def stats() -> dict:
+def stats(hike_min_km: float | None = None) -> dict:
     # Stats respect the serve-time hike threshold so the numbers match the map.
+    hike_min_m = _resolve_hike_min_m(hike_min_km)
     row = _db_fetchone(
         "SELECT count(*), min(start_time), max(start_time) FROM activities "
         "WHERE NOT (type = 'Hike' AND distance_m < ?)",
-        [_HIKE_MIN_M],
+        [hike_min_m],
     )
     yearly = _db_fetchall(
         """
@@ -278,12 +289,14 @@ def stats() -> dict:
         WHERE start_time IS NOT NULL AND NOT (type = 'Hike' AND distance_m < ?)
         GROUP BY 1 ORDER BY 1
         """,
-        [_HIKE_MIN_M],
+        [hike_min_m],
     )
     return {
         "count": int(row[0] or 0),
         "earliest": row[1].isoformat() if row[1] else None,
         "latest": row[2].isoformat() if row[2] else None,
+        # Server default, for the settings UI placeholder.
+        "hike_min_km_default": _HIKE_MIN_M / 1000.0,
         "yearly": [
             {"year": int(y), "trail": int(t or 0), "hike": int(h or 0), "road": int(r or 0)}
             for y, t, h, r in yearly
@@ -303,6 +316,7 @@ def match_point(
     date_start: str | None = None, date_end: str | None = None,
     type: str | None = None,
     min_km: float | None = None, max_km: float | None = None,
+    hike_min_km: float | None = None,
 ) -> list[dict]:
     """Runs whose track came within `r` metres of (lat, lon). Each match
     carries its simplified polyline so the client can render the precise
@@ -315,7 +329,7 @@ def match_point(
     radius_deg = r / 111_320.0
     where = ["ST_DWithin(ST_Scale(track, ?, 1.0), ST_Scale(ST_Point(?, ?), ?, 1.0), ?)"]
     params: list = [cos_lat, lon, lat, cos_lat, radius_deg]
-    fwhere, fparams, _ = _filter_clause(date_start, date_end, type, min_km, max_km)
+    fwhere, fparams, _ = _filter_clause(date_start, date_end, type, min_km, max_km, hike_min_km)
     where.extend(fwhere)
     params.extend(fparams)
     sql = (
@@ -335,10 +349,11 @@ def match_polygon(
     type: str | None = Form(None),
     min_km: float | None = Form(None),
     max_km: float | None = Form(None),
+    hike_min_km: float | None = Form(None),
 ) -> list[dict]:
     where = ["ST_Intersects(track, ST_GeomFromText(?))"]
     params: list = [wkt]
-    fwhere, fparams, _ = _filter_clause(date_start, date_end, type, min_km, max_km)
+    fwhere, fparams, _ = _filter_clause(date_start, date_end, type, min_km, max_km, hike_min_km)
     where.extend(fwhere)
     params.extend(fparams)
     sql = (
@@ -502,12 +517,14 @@ def activity_index(
     date_start: str | None = None, date_end: str | None = None,
     type: str | None = None,
     min_km: float | None = None, max_km: float | None = None,
+    hike_min_km: float | None = None,
 ) -> Response:
-    _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km)
+    _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km, hike_min_km)
     return _serve_cached(
         _cache_sig("index", sig),
         lambda: _build_index(date_start=date_start, date_end=date_end,
-                             type=type, min_km=min_km, max_km=max_km),
+                             type=type, min_km=min_km, max_km=max_km,
+                             hike_min_km=hike_min_km),
     )
 
 
@@ -516,16 +533,18 @@ def aggregate_geojson(
     date_start: str | None = None, date_end: str | None = None,
     type: str | None = None,
     min_km: float | None = None, max_km: float | None = None,
+    hike_min_km: float | None = None,
     lod: str = _AGG_LOD_DEFAULT,
 ) -> Response:
     if lod not in _AGG_LODS:
         raise HTTPException(400, f"Unknown lod '{lod}'. Expected one of: {sorted(_AGG_LODS)}")
-    _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km)
+    _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km, hike_min_km)
     sig = {**sig, "lod": lod}
     return _serve_cached(
         _cache_sig("aggregate2", sig),
         lambda: _build_aggregate(lod=lod, date_start=date_start, date_end=date_end,
-                                  type=type, min_km=min_km, max_km=max_km),
+                                  type=type, min_km=min_km, max_km=max_km,
+                                  hike_min_km=hike_min_km),
     )
 
 
@@ -534,12 +553,14 @@ def heatmap_json(
     date_start: str | None = None, date_end: str | None = None,
     type: str | None = None,
     min_km: float | None = None, max_km: float | None = None,
+    hike_min_km: float | None = None,
 ) -> Response:
-    _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km)
+    _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km, hike_min_km)
     return _serve_cached(
         _cache_sig("heatmap", sig),
         lambda: _build_heatmap(date_start=date_start, date_end=date_end,
-                               type=type, min_km=min_km, max_km=max_km),
+                               type=type, min_km=min_km, max_km=max_km,
+                               hike_min_km=hike_min_km),
     )
 
 

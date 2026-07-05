@@ -372,6 +372,11 @@ let activeFilters = {
   max_km: null,
 };
 
+// Hike/walk minimum-distance override (km). null = server default
+// (RUN_MAP_HIKE_MIN_KM). A setting rather than a chip filter — it rides on
+// every data request and persists in the hash as `hmin`.
+let hikeMinKm = null;
+
 function filterQueryString() {
   const p = new URLSearchParams();
   if (activeFilters.date_start) p.set('date_start', activeFilters.date_start);
@@ -379,6 +384,7 @@ function filterQueryString() {
   if (activeFilters.type) p.set('type', activeFilters.type);
   if (activeFilters.min_km != null) p.set('min_km', activeFilters.min_km);
   if (activeFilters.max_km != null) p.set('max_km', activeFilters.max_km);
+  if (hikeMinKm != null) p.set('hike_min_km', hikeMinKm);
   return p.toString();
 }
 
@@ -400,6 +406,7 @@ function _currentHash() {
   if (activeFilters.date_start) p.set('fds', activeFilters.date_start);
   if (activeFilters.date_end) p.set('fde', activeFilters.date_end);
   if (activeFilters.type) p.set('ftype', activeFilters.type);
+  if (hikeMinKm != null) p.set('hmin', hikeMinKm);
   if (activeFilters.min_km != null) p.set('fmin', activeFilters.min_km);
   if (activeFilters.max_km != null) p.set('fmax', activeFilters.max_km);
   // Settings persistence — only non-default values go on the wire to keep
@@ -455,6 +462,7 @@ function loadSavedState() {
     filterDateStart: p.get('fds') || null,
     filterDateEnd: p.get('fde') || null,
     filterType: p.get('ftype') || null,
+    hikeMinKm: p.get('hmin') != null ? Number(p.get('hmin')) : null,
     filterMinKm: p.get('fmin') ? Number(p.get('fmin')) : null,
     filterMaxKm: p.get('fmax') ? Number(p.get('fmax')) : null,
     baseLayer: p.get('base') || 'Topo (OpenTopoMap)',
@@ -1900,6 +1908,23 @@ document.getElementById('apply-radius').onclick = () => {
   queryPoint(p.lat, p.lng);
 };
 
+// Hike/walk minimum-distance setting: empty input = server default.
+function _setHikeMin(v) {
+  hikeMinKm = v;
+  applyFilters();
+  loadStats();
+}
+document.getElementById('hike-min-km').addEventListener('change', e => {
+  const raw = e.target.value.trim();
+  const v = raw === '' ? null : Math.max(Number(raw), 0);
+  if (v != null && !Number.isFinite(v)) return;
+  _setHikeMin(v);
+});
+document.getElementById('hike-min-reset').onclick = () => {
+  document.getElementById('hike-min-km').value = '';
+  _setHikeMin(null);
+};
+
 
 // Heatmap overlay toggle — separate density layer (proper kernel) on top of
 // the aggregate. Visible only at z >= HEX_ZOOM_THRESHOLD.
@@ -2582,8 +2607,15 @@ function renderYearChart(yearly) {
 }
 
 async function loadStats() {
-  const r = await fetch('/stats');
+  const qs = hikeMinKm != null ? `?hike_min_km=${hikeMinKm}` : '';
+  const r = await fetch(`/stats${qs}`);
   const s = await r.json();
+  // Advertise the server default; the input shows it as a placeholder so an
+  // empty box reads as "using the default".
+  const hikeInput = document.getElementById('hike-min-km');
+  if (hikeInput && s.hike_min_km_default != null) {
+    hikeInput.placeholder = String(s.hike_min_km_default);
+  }
   const div = document.getElementById('stats-content');
   if (!s.count) {
     div.innerHTML = '<p class="muted">No data yet. Import a Strava ZIP or sync below.</p>';
@@ -2609,7 +2641,7 @@ async function applyURLState({ animate } = { animate: false }) {
   const saved = loadSavedState();
   _restoringState = true;
 
-  const prevFilterKey = JSON.stringify([polygonFilter, activeFilters]);
+  const prevFilterKey = JSON.stringify([polygonFilter, activeFilters, hikeMinKm]);
 
   // Reset filters from URL
   polygonFilter = saved?.polygonFilter || null;
@@ -2621,6 +2653,9 @@ async function applyURLState({ animate } = { animate: false }) {
     min_km: saved?.filterMinKm ?? null,
     max_km: saved?.filterMaxKm ?? null,
   };
+  hikeMinKm = saved?.hikeMinKm ?? null;
+  const hikeInput = document.getElementById('hike-min-km');
+  if (hikeInput) hikeInput.value = hikeMinKm != null ? String(hikeMinKm) : '';
   // "All pills off" is client-only and never serialised into the hash, so a
   // restored URL is by definition not in that state. Without this reset,
   // browser-back after all-off leaves the ghost notice over live pills.
@@ -2676,7 +2711,7 @@ async function applyURLState({ animate } = { animate: false }) {
     document.getElementById('search-radius-label').textContent = srVal > 0 ? `${srVal} m` : 'auto';
   }
 
-  const newFilterKey = JSON.stringify([polygonFilter, activeFilters]);
+  const newFilterKey = JSON.stringify([polygonFilter, activeFilters, hikeMinKm]);
   const filterChanged = newFilterKey !== prevFilterKey;
   const haveSavedView = saved && saved.center && Array.isArray(saved.center) && saved.zoom != null;
 

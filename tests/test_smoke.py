@@ -621,6 +621,36 @@ def test_stats_content_id_is_unique(page: Page, app_url):
     assert page.evaluate("() => document.querySelectorAll('#stats-content').length") == 1
 
 
+def test_hike_threshold_setting(page: Page, app_url):
+    """The settings drawer exposes the hike/walk minimum-distance control:
+    changing it refetches data with hike_min_km and persists in the hash."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    page.click("#open-settings")
+    inp = page.locator("#hike-min-km")
+    inp.wait_for(state="visible", timeout=3_000)
+    # Placeholder advertises the server default.
+    assert inp.get_attribute("placeholder") == "5"
+
+    with page.expect_response(
+        lambda r: "/index.json" in r.url and "hike_min_km=1" in r.url,
+        timeout=10_000,
+    ):
+        inp.fill("1")
+        inp.dispatch_event("change")
+
+    page.wait_for_function("() => location.hash.includes('hmin=1')", timeout=4_000)
+
+    # Reset returns to the server default: no hmin in the hash.
+    with page.expect_response(
+        lambda r: "/index.json" in r.url and "hike_min_km" not in r.url,
+        timeout=10_000,
+    ):
+        page.click("#hike-min-reset")
+    page.wait_for_function("() => !location.hash.includes('hmin=')", timeout=4_000)
+
+
 def test_browser_back_clears_all_types_off_ghost(page: Page, app_url):
     """Going all-pills-off pushes a history checkpoint; browser back must
     fully restore the previous state — no stuck 'All tracks hidden' notice

@@ -563,6 +563,37 @@ def test_short_hikes_are_stored_but_not_served(app_client):
     assert stats["yearly"][0]["hike"] == 1
 
 
+def test_hike_threshold_query_param(app_client):
+    """`hike_min_km=` on the filtered endpoints overrides the server default
+    per-request (each value gets its own cache signature)."""
+    client, db_mod, api_mod = app_client
+    conn = db_mod.connect()
+    _seed_dist(conn, id=1, type_="Hike", distance_m=3000.0,
+               coords=[(-1.5, 53.5), (-1.501, 53.502)])
+    _seed_dist(conn, id=2, type_="Hike", distance_m=8000.0,
+               coords=[(2.0, 48.0), (2.002, 48.001)])
+
+    # Default: only the 8 km hike.
+    assert {a["id"] for a in client.get("/index.json").json()["activities"]} == {2}
+    # Lowered: both.
+    got = client.get("/index.json?hike_min_km=2").json()
+    assert {a["id"] for a in got["activities"]} == {1, 2}
+    # Raised: neither.
+    got = client.get("/index.json?hike_min_km=10").json()
+    assert got["activities"] == []
+
+    # /stats takes the same override so the drawer numbers agree with the map.
+    s = client.get("/stats?hike_min_km=2").json()
+    assert s["count"] == 2
+    # And the response advertises the server default for the UI placeholder.
+    assert s["hike_min_km_default"] == 5.0
+
+    # Distinct cache signatures per value.
+    a = api_mod._filter_clause(hike_min_km=2.0)[2]
+    b = api_mod._filter_clause()[2]
+    assert a["hike_min_m"] != b["hike_min_m"]
+
+
 def test_hike_threshold_env_override(app_client, monkeypatch, tmp_path):
     """RUN_MAP_HIKE_MIN_KM changes the serve-time gate without re-import."""
     client, db_mod, api_mod = app_client

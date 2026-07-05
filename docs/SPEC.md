@@ -73,7 +73,7 @@ Both paths use `INSERT … ON CONFLICT (id) DO UPDATE`, so a re-import / re-sync
 
 - `date_start`, `date_end` — ISO `YYYY-MM-DD`, inclusive on both ends; either can be omitted for an open-ended window. Bad input → 400.
 - `/match`'s radius is isotropic: longitudes are cos(lat)-scaled on both sides of the `ST_DWithin` test so `r` metres reaches equally far in every direction.
-- Every filtered query (and `/stats`) carries a baseline clause excluding hikes below `RUN_MAP_HIKE_MIN_KM`; the threshold is part of every cache signature.
+- Every filtered query (and `/stats`) carries a baseline clause excluding hikes below the threshold; the threshold is part of every cache signature. Default comes from `RUN_MAP_HIKE_MIN_KM`; every filtered endpoint (and `/stats`) accepts a per-request `hike_min_km=` override. The settings drawer exposes it ("Hikes & walks → Minimum distance to show"); the value rides the URL hash as `hmin` and applies without a restart. `/stats` returns `hike_min_km_default` for the UI placeholder.
 - `type` — `Run` (road), `TrailRun`, or `Hike` (hikes + walks); accepts a comma-separated list (`type=Run,Hike`) which becomes a SQL `IN`. List order doesn't matter — values are sorted before hitting the WHERE clause and the cache signature.
 - `min_km`, `max_km` — distance window in km
 
