@@ -759,7 +759,7 @@ function renderHexes() {
     },
     onEachFeature: (feat, layer) => {
       const n = feat.properties.count;
-      layer.bindTooltip(`${n} run${n === 1 ? '' : 's'}`, { sticky: true, opacity: 0.9 });
+      layer.bindTooltip(`${n} activit${n === 1 ? 'y' : 'ies'}`, { sticky: true, opacity: 0.9 });
       layer.on('mouseover', () => layer.setStyle({ weight: 2, color: '#222' }));
       layer.on('mouseout',  () => layer.setStyle({ weight: 0.6, color: '#ffffff' }));
       layer.on('click', e => {
@@ -824,6 +824,14 @@ function _swapAggregateToZoom() {
 }
 
 function applyZoomMode() {
+  // "All tracks hidden" (every type pill off) wins over zoom: without this
+  // guard a zoomend would re-render hexes or re-attach the aggregate.
+  if (_allTypesOff) {
+    if (hexLayer) { map.removeLayer(hexLayer); hexLayer = null; }
+    _detachAggregate();
+    if (heatmapLayer && map.hasLayer(heatmapLayer)) map.removeLayer(heatmapLayer);
+    return;
+  }
   // If h3-js failed to load, never go into hex mode — just show aggregate.
   const useTracks = map.getZoom() >= HEX_ZOOM_THRESHOLD || !window.h3;
   if (useTracks) {
@@ -965,7 +973,7 @@ function renderMatches(matches, atLatLng, { fit = true } = {}) {
   if (!matches.length) {
     matchesPanelOpen = true;
     document.getElementById('matches-content').innerHTML =
-      '<p class="muted" style="margin:4px 0">No runs here at this radius.</p>';
+      '<p class="muted" style="margin:4px 0">No tracks here at this radius.</p>';
     document.getElementById('matches-panel').classList.remove('hidden');
     return;
   }
@@ -2245,7 +2253,7 @@ document.getElementById('filter-show-matches').addEventListener('click', async (
   try { matches = await fetchFilteredMatches(); } finally { hideSpinner(); }
   if (!matches.length) {
     _filteredMatchActive = false;
-    showToast('No runs match these filters.');
+    showToast('No tracks match these filters.');
     return;
   }
   _filteredMatchActive = true;

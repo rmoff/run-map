@@ -488,6 +488,32 @@ def test_type_pill_all_off_hides_tracks(page: Page, app_url):
     page.wait_for_function("() => window.__rm.aggregateOn()", timeout=8_000)
 
 
+def test_all_types_off_survives_zoom(page: Page, app_url):
+    """The 'All tracks hidden' state must hold across zoom changes: zooming
+    below the hex threshold must not render hexes, and zooming back in must
+    not resurrect the aggregate."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    for t in ("Run", "TrailRun", "Hike"):
+        page.click(f'#type-pills [data-type="{t}"]')
+    expect(page.locator("#type-empty-notice")).to_be_visible()
+
+    page.evaluate("() => window.__rm.map.setZoom(9)")
+    page.wait_for_timeout(1200)
+    assert not page.evaluate("() => window.__rm.hexOn()"), \
+        "hex layer must stay hidden while all types are off"
+
+    page.evaluate("() => window.__rm.map.setZoom(14)")
+    page.wait_for_timeout(1200)
+    assert not page.evaluate("() => window.__rm.aggregateOn()"), \
+        "aggregate must stay hidden while all types are off"
+
+    # Turning a pill back on restores the normal zoom behaviour.
+    page.click('#type-pills [data-type="Run"]')
+    page.wait_for_function("() => window.__rm.aggregateOn()", timeout=8_000)
+
+
 def _first_nonzero_snap(page: Page) -> int:
     """Return the smallest non-zero distance in the slider's snap set —
     guaranteed to exist in the user's library, so setting the lower handle

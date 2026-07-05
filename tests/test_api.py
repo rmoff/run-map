@@ -470,6 +470,21 @@ def test_stats_counts_three_type_buckets(app_client):
     assert by_year[2025] == {"year": 2025, "trail": 0, "hike": 1, "road": 0}
 
 
+# ---- Static asset caching -------------------------------------------------
+
+
+def test_static_assets_require_revalidation(app_client):
+    """index.html and the static bundle must carry Cache-Control: no-cache so
+    browsers revalidate on every load. Without it, heuristic caching serves a
+    stale app.js against fresh index.html — mismatched pill logic in the UI."""
+    client, *_ = app_client
+    for path in ("/", "/static/app.js", "/static/style.css"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert r.headers.get("cache-control") == "no-cache", \
+            f"{path}: Cache-Control={r.headers.get('cache-control')!r}"
+
+
 # ---- Disk cache ----------------------------------------------------------
 
 

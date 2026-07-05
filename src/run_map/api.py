@@ -27,6 +27,19 @@ app.add_middleware(GZipMiddleware, minimum_size=512)
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+
+@app.middleware("http")
+async def _revalidate_static(request, call_next):
+    """index.html and the /static bundle ship without a build step, so there
+    are no hashed filenames to bust caches with. Force revalidation (cheap
+    304s via ETag/Last-Modified) — otherwise heuristic caching can serve a
+    stale app.js against a fresh index.html and the UI wiring breaks."""
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 _tls = threading.local()
 
 
@@ -530,7 +543,7 @@ def _run_import_thread(root: Path) -> None:
                 "running": False, "phase": "done",
                 "inserted": inserted, "unreadable": unreadable,
                 "message": (
-                    f"Imported {inserted} runs"
+                    f"Imported {inserted} activities"
                     + (f" · {unreadable} files unreadable" if unreadable else "")
                 ),
                 "error": None,
@@ -689,8 +702,9 @@ def _run_sync_thread(tokens: dict, since: int | None) -> None:
                 "running": False, "phase": "done",
                 "inserted": inserted, "skipped": skipped,
                 "message": (
-                    f"Synced {inserted} runs"
-                    + (f" · {skipped} other-sport / no-GPS ignored" if skipped else "")
+                    f"Synced {inserted} activities"
+                    + (f" · {skipped} skipped (other sports, hikes/walks ≤ 5 km, no GPS)"
+                       if skipped else "")
                 ),
                 "error": None,
             })
