@@ -432,6 +432,25 @@ def test_match_filters_by_distance(app_client):
     assert {m["id"] for m in r.json()} == {2}
 
 
+def test_match_radius_is_isotropic(app_client):
+    """The match radius must reach equally far east-west as north-south.
+    Naive degree math shrinks the east-west reach by cos(latitude) — at
+    lat 53.5 a 70 m east offset sat outside a nominal 100 m radius."""
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    import math
+    # Straight north-south track through (-1.5, 53.50..53.51).
+    _seed(conn, id=1, coords=[(-1.5, 53.50), (-1.5, 53.505), (-1.5, 53.51)])
+    lat = 53.505
+    dlon = 70 / (111_320 * math.cos(math.radians(lat)))  # 70 m east
+
+    east = client.get("/match", params={"lat": lat, "lon": -1.5 + dlon, "r": 100}).json()
+    assert {m["id"] for m in east} == {1}, "70 m east must be inside a 100 m radius"
+
+    east_tight = client.get("/match", params={"lat": lat, "lon": -1.5 + dlon, "r": 50}).json()
+    assert east_tight == [], "70 m east must be outside a 50 m radius"
+
+
 def test_filter_options_endpoint(app_client):
     client, db_mod, _ = app_client
     conn = db_mod.connect()
@@ -468,6 +487,35 @@ def test_stats_counts_three_type_buckets(app_client):
     by_year = {y["year"]: y for y in j["yearly"]}
     assert by_year[2024] == {"year": 2024, "trail": 1, "hike": 1, "road": 2}
     assert by_year[2025] == {"year": 2025, "trail": 0, "hike": 1, "road": 0}
+
+
+# ---- Sync state machine ----------------------------------------------------
+
+
+def test_sync_kickoff_failure_resets_running_flag(app_client, monkeypatch):
+    """If token refresh (or range parsing) blows up after the running flag is
+    set, the flag must be reset — otherwise every later sync returns
+    already_running until the server restarts."""
+    client, _, api_mod = app_client
+    monkeypatch.setattr(api_mod.ingest_strava, "load_config",
+                        lambda: {"client_id": "x", "client_secret": "y"})
+    monkeypatch.setattr(api_mod.ingest_strava, "load_tokens",
+                        lambda: {"access_token": "t", "refresh_token": "r"})
+
+    def boom(*a, **kw):
+        raise RuntimeError("strava unreachable")
+    monkeypatch.setattr(api_mod.ingest_strava, "refresh_tokens", boom)
+
+    r = client.post("/strava/sync", data={"range": "Since last sync"})
+    assert r.status_code == 500
+
+    status = client.get("/strava/sync/status").json()
+    assert status["running"] is False, "kickoff failure must reset running"
+    assert status["phase"] == "error"
+
+    # A retry must not be locked out.
+    r2 = client.post("/strava/sync", data={"range": "Since last sync"})
+    assert r2.json().get("status") != "already_running"
 
 
 # ---- Static asset caching -------------------------------------------------

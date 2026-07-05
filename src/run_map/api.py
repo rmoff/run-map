@@ -6,6 +6,7 @@ import asyncio
 import gzip
 import hashlib
 import json
+import shutil
 import tempfile
 import threading
 import zipfile
@@ -291,9 +292,14 @@ def match_point(
     """Runs whose track came within `r` metres of (lat, lon). Each match
     carries its simplified polyline so the client can render the precise
     track without having loaded the bulk track set."""
-    radius_deg = r / 111_000.0
-    where = ["ST_DWithin(track, ST_Point(?, ?), ?)"]
-    params: list = [lon, lat, radius_deg]
+    import math
+    # Longitude degrees shrink by cos(lat); scale X on both geometries so the
+    # degree-space distance test is isotropic in metres (a 100 m radius used
+    # to reach only ~60 m east-west at UK latitudes).
+    cos_lat = max(math.cos(math.radians(lat)), 1e-6)
+    radius_deg = r / 111_320.0
+    where = ["ST_DWithin(ST_Scale(track, ?, 1.0), ST_Scale(ST_Point(?, ?), ?, 1.0), ?)"]
+    params: list = [cos_lat, lon, lat, cos_lat, radius_deg]
     fwhere, fparams, _ = _filter_clause(date_start, date_end, type, min_km, max_km)
     where.extend(fwhere)
     params.extend(fparams)
@@ -527,7 +533,7 @@ _import_state: dict = {
 _import_lock = threading.Lock()
 
 
-def _run_import_thread(root: Path) -> None:
+def _run_import_thread(root: Path, tmp_path: Path) -> None:
     def on_progress(done: int, total: int, label: str) -> None:
         with _import_lock:
             _import_state["phase"] = "importing"
@@ -554,6 +560,9 @@ def _run_import_thread(root: Path) -> None:
                 "running": False, "phase": "error",
                 "error": str(e), "message": f"Import failed: {e}",
             })
+    finally:
+        # The extracted export (zip + media) can be gigabytes; don't leak it.
+        shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 @app.post("/import/zip")
@@ -588,9 +597,10 @@ async def import_zip(file: UploadFile = File(...)) -> dict:
     except Exception as e:
         with _import_lock:
             _import_state.update({"running": False, "phase": "error", "error": str(e)})
+        shutil.rmtree(tmp_path, ignore_errors=True)
         raise HTTPException(500, str(e))
 
-    threading.Thread(target=_run_import_thread, args=(root,), daemon=True).start()
+    threading.Thread(target=_run_import_thread, args=(root, tmp_path), daemon=True).start()
     return {"status": "started"}
 
 
@@ -735,14 +745,22 @@ def strava_sync(range: str = Form("Since last sync")) -> dict:
             "message": "Starting…", "error": None,
         })
 
-    cfg = ingest_strava.load_config()
-    tokens = ingest_strava.load_tokens()
-    if not tokens or not cfg.get("client_id"):
+    # Anything that fails between setting running=True and spawning the
+    # worker must reset the flag, or every later sync gets "already_running".
+    try:
+        cfg = ingest_strava.load_config()
+        tokens = ingest_strava.load_tokens()
+        if not tokens or not cfg.get("client_id"):
+            raise HTTPException(400, "Not authorised yet")
+        tokens = ingest_strava.refresh_tokens(cfg["client_id"], cfg["client_secret"], tokens)
+        since = _range_to_epoch(range)
+    except Exception as e:
+        msg = e.detail if isinstance(e, HTTPException) else str(e)
         with _sync_lock:
-            _sync_state.update({"running": False, "phase": "error", "error": "Not authorised yet"})
-        raise HTTPException(400, "Not authorised yet")
-    tokens = ingest_strava.refresh_tokens(cfg["client_id"], cfg["client_secret"], tokens)
-    since = _range_to_epoch(range)
+            _sync_state.update({"running": False, "phase": "error", "error": msg, "message": msg})
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(500, msg)
 
     threading.Thread(target=_run_sync_thread, args=(tokens, since), daemon=True).start()
     return {"status": "started"}

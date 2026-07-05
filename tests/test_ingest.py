@@ -78,6 +78,44 @@ def test_bulk_ingest_admits_long_hikes_and_walks(fresh_db, tmp_path):
     assert skipped == 1
 
 
+def test_bulk_ingest_missing_csv_raises_normal_exception(fresh_db, tmp_path):
+    """A missing activities.csv must raise a regular exception, not
+    SystemExit — SystemExit is silently swallowed by worker threads, which
+    wedges the import state machine with running=True forever."""
+    from run_map import ingest_bulk
+    importlib.reload(ingest_bulk)
+
+    empty = tmp_path / "empty-export"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError):
+        ingest_bulk.ingest(empty)
+
+
+def test_bulk_ingest_survives_corrupt_rows(fresh_db, tmp_path):
+    """One unreadable track file or malformed CSV cell must not abort the
+    import — remaining rows still ingest and the skip is counted."""
+    from run_map import ingest_bulk
+    importlib.reload(ingest_bulk)
+
+    export = _make_export(tmp_path, [
+        {"id": 1, "name": "good run", "type": "Run", "km": 5.0},
+        {"id": 2, "name": "corrupt", "type": "Run", "km": 5.0},
+        {"id": 3, "name": "also good", "type": "Run", "km": 5.0},
+    ])
+    (export / "activities/2.gpx").write_text("<gpx><trk><trkseg>")  # truncated XML
+    # Blank Moving Time cell on row 3 (pandas reads it as NaN).
+    csv = (export / "activities.csv").read_text().replace(
+        "also good,Run,5.0,1800", "also good,Run,5.0,")
+    (export / "activities.csv").write_text(csv)
+
+    inserted, skipped = ingest_bulk.ingest(export)
+
+    stored = _stored_types(fresh_db)
+    assert set(stored) == {1, 3}, f"rows after the corrupt one must ingest: {stored}"
+    assert inserted == 2
+    assert skipped == 1
+
+
 def test_strava_sync_admits_long_hikes_and_gates_short_ones(fresh_db, monkeypatch):
     from run_map import ingest_strava
     importlib.reload(ingest_strava)
