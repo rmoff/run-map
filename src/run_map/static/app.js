@@ -255,6 +255,7 @@ map.addControl(_filterCtl);
 // we evaluate `e.target.closest('.flatpickr-calendar')` BEFORE flatpickr's
 // own click handler detaches the clicked element during re-render.
 document.addEventListener('click', e => {
+  let closedAny = false;
   for (const id of ['display-menu', 'filter-menu']) {
     const menu = document.getElementById(id);
     if (menu.classList.contains('hidden')) continue;
@@ -272,13 +273,30 @@ document.addEventListener('click', e => {
         )) continue;
     menu.classList.add('hidden');
     if (id === 'filter-menu') document.body.classList.remove('filter-menu-open');
+    closedAny = true;
+  }
+  // A click that dismissed a popover has done its job — if it landed on the
+  // map, don't let it fall through to Leaflet and fire a match query.
+  if (closedAny && e.target.closest('#map')) {
+    e.stopPropagation();
+    e.preventDefault();
   }
 }, true);
 
 // Path styling.
 // The aggregate layer is one big GeoJSON of every road/trail you've run —
-// a "street map of your runs". Single blue line, no per-track casing.
+// a "street map of your runs". Worn-path rendering: the server buckets
+// segments by how many activities crossed them, and habitual routes draw
+// heavier than one-offs (single hue; weight + opacity carry the frequency).
 const STYLE_AGG = { color: '#1a5a8a', weight: 2.5, opacity: 0.85 };
+const AGG_BUCKET_STYLES = {
+  low:  { color: '#1a5a8a', weight: 1.4, opacity: 0.45 },
+  mid:  { color: '#1a5a8a', weight: 2.5, opacity: 0.8 },
+  high: { color: '#1a5a8a', weight: 3.6, opacity: 0.95 },
+};
+function _styleAggFor(feat) {
+  return AGG_BUCKET_STYLES[feat?.properties?.bucket] || STYLE_AGG;
+}
 const STYLE_AGG_DIM_DEFAULT = 0.45;
 const STYLE_AGG_DIM_WEIGHT = 2.0;
 function _styleAggDim() {
@@ -536,7 +554,7 @@ async function resetToLastRun() {
   lastMatches = [];     // un-block heatmap + visually consistent with the cleared layers
   // Aggregate returns to full prominence; heatmap allowed back.
   if (activeAggLod && aggregateLayers[activeAggLod] && map.hasLayer(aggregateLayers[activeAggLod])) {
-    aggregateLayers[activeAggLod].setStyle(STYLE_AGG);
+    aggregateLayers[activeAggLod].setStyle(_styleAggFor);
   }
   heatmapClickSuppressed = false;
   applyHeatmapVisibility();
@@ -624,48 +642,71 @@ function _clearAggregateLayers() {
   aggregateSegments = [];
 }
 
-// Fetch + parse one LOD. Builds the L.geoJSON layer and, for AGG_SNAP_LOD,
-// populates aggregateSegments. Idempotent: a second call with the same lod
-// awaits the in-flight promise instead of refetching.
-function ensureAggLod(lod) {
-  if (aggregateLayers[lod]) return Promise.resolve(aggregateLayers[lod]);
-  if (aggregateLoads[lod]) return aggregateLoads[lod];
+// Fetch + parse one LOD off-map: returns { layer, segs } (segs only for the
+// snap LOD) or null. Doesn't touch any shared state, so callers decide when
+// (and whether) the result becomes live.
+async function _buildAggLod(lod) {
   const qs = filterQueryString();
   const url = `/aggregate.geojson?lod=${lod}${qs ? `&${qs}` : ''}`;
-  const p = (async () => {
-    const r = await fetch(url);
-    if (!r.ok) return null;
-    const gj = await r.json();
-    const feat = gj.features?.[0];
-    if (!feat || !feat.geometry) return null;
-    if (lod === AGG_SNAP_LOD) {
-      const coords = feat.geometry.coordinates || [];
-      const segs = [];
-      for (const seg of coords) {
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  const gj = await r.json();
+  const feat = gj.features?.[0];
+  if (!feat || !feat.geometry) return null;
+  let segs = null;
+  if (lod === AGG_SNAP_LOD) {
+    segs = [];
+    for (const f of gj.features) {
+      for (const seg of f.geometry.coordinates || []) {
         if (seg.length >= 2) {
           segs.push([[seg[0][1], seg[0][0]], [seg[1][1], seg[1][0]]]);
         }
       }
-      aggregateSegments = segs;
     }
-    const layer = L.geoJSON(gj, { style: () => STYLE_AGG, interactive: false, renderer: aggRenderer, pane: 'aggPane' });
-    aggregateLayers[lod] = layer;
-    return layer;
+  }
+  const layer = L.geoJSON(gj, { style: _styleAggFor, interactive: false, renderer: aggRenderer, pane: 'aggPane' });
+  return { layer, segs };
+}
+
+// Lazy-load one LOD into the live store. Idempotent: a second call with the
+// same lod awaits the in-flight promise instead of refetching.
+function ensureAggLod(lod) {
+  if (aggregateLayers[lod]) return Promise.resolve(aggregateLayers[lod]);
+  if (aggregateLoads[lod]) return aggregateLoads[lod];
+  const p = (async () => {
+    const built = await _buildAggLod(lod);
+    if (!built) return null;
+    if (built.segs) aggregateSegments = built.segs;
+    aggregateLayers[lod] = built.layer;
+    return built.layer;
   })();
   aggregateLoads[lod] = p;
   return p;
 }
 
+// Reload counter: a slow reload that has been superseded by a newer one (or
+// by another _clearAggregateLayers-triggering path) must throw its result
+// away instead of installing stale data.
+let _aggReloadGen = 0;
+
 async function loadAggregate() {
-  _clearAggregateLayers();
-  // Load the LOD for the current zoom (for display) and the snap LOD (for
-  // click-to-track). When the user is already zoomed into the snap band these
-  // collapse into one fetch.
+  // Build the new layers OFF-map first — the old aggregate stays visible and
+  // clickable during the fetch+parse (seconds on a big library) — and swap
+  // only when everything is ready.
+  const gen = ++_aggReloadGen;
   const current = lodForZoom(map.getZoom());
-  const tasks = [ensureAggLod(current)];
-  if (current !== AGG_SNAP_LOD) tasks.push(ensureAggLod(AGG_SNAP_LOD));
-  await Promise.all(tasks);
-  // applyZoomMode decides whether to attach (depends on hex/match state).
+  const lods = current !== AGG_SNAP_LOD ? [current, AGG_SNAP_LOD] : [current];
+  const built = await Promise.all(lods.map(lod => _buildAggLod(lod)));
+  if (gen !== _aggReloadGen) return false;  // superseded — discard
+  _clearAggregateLayers();
+  built.forEach((b, i) => {
+    if (!b) return;
+    aggregateLayers[lods[i]] = b.layer;
+    if (b.segs) aggregateSegments = b.segs;
+  });
+  // Reattach immediately so there's no blank frame between clear and the
+  // caller's applyZoomMode.
+  applyZoomMode();
   return !!aggregateLayers[current];
 }
 
@@ -786,8 +827,13 @@ function _detachAggregate() {
 }
 
 function _currentAggStyle() {
-  // Dim when a match is active, otherwise the standard look.
-  return lastMatches && lastMatches.length ? _styleAggDim() : STYLE_AGG;
+  // Dim (uniform) when a match is active, otherwise the per-bucket worn-path
+  // look. Returned as a style function so setStyle re-evaluates per feature.
+  if (lastMatches && lastMatches.length) {
+    const dim = _styleAggDim();
+    return () => dim;
+  }
+  return _styleAggFor;
 }
 
 // Swap to the LOD for the current zoom. Lazy-loads if the band hasn't been
@@ -1005,7 +1051,25 @@ function renderMatches(matches, atLatLng, { fit = true } = {}) {
   // Multiple matches: show the table in the top-right panel, with layer
   // tooltips so each red line is identifiable from the map alone.
   bindMatchTooltips(matches);
-  const html = `<table class="matches-table"><tbody>${matches.map(rowHtml).join('')}</tbody></table>`;
+  // Header answers "when?" before the user scrolls a single row: count and
+  // first→last span. Year separator rows keep hundreds of rows scannable
+  // (matches arrive newest-first from the server).
+  const stamps = matches.map(m => m.start_time).filter(Boolean).sort();
+  const span = stamps.length
+    ? ` · ${stamps[0].slice(0, 7)} → ${stamps[stamps.length - 1].slice(0, 7)}`
+    : '';
+  const summary = `<div class="matches-summary"><strong>${matches.length}</strong> matches${span} · newest first</div>`;
+  let lastYear = null;
+  const rows = [];
+  for (const m of matches) {
+    const year = m.start_time ? m.start_time.slice(0, 4) : '?';
+    if (year !== lastYear) {
+      rows.push(`<tr class="year-sep"><td colspan="4">${year}</td></tr>`);
+      lastYear = year;
+    }
+    rows.push(rowHtml(m));
+  }
+  const html = `${summary}<table class="matches-table"><tbody>${rows.join('')}</tbody></table>`;
   const content = document.getElementById('matches-content');
   content.innerHTML = html;
   document.getElementById('matches-panel').classList.remove('hidden');
@@ -1093,7 +1157,7 @@ function clearMatches() {
   hidePreview();
   // Aggregate returns to full prominence once nothing is matched.
   if (activeAggLod && aggregateLayers[activeAggLod] && map.hasLayer(aggregateLayers[activeAggLod])) {
-    aggregateLayers[activeAggLod].setStyle(STYLE_AGG);
+    aggregateLayers[activeAggLod].setStyle(_styleAggFor);
   }
   // Heatmap was hidden while match was active — restore if toggle is on.
   heatmapClickSuppressed = false;
@@ -1749,9 +1813,16 @@ document.getElementById('close-settings').onclick = closeSettings;
 document.getElementById('scrim').onclick = closeSettings;
 
 // User-initiated × on the matches panel: suppress further auto-matches.
+// If the matches came from a drawn polygon, dismissing them dismisses the
+// polygon too — otherwise the outline strands on the map looking like an
+// active filter (and its own × can sit buried under this very panel).
 document.getElementById('matches-close').onclick = () => {
   autoMatchSuppressed = true;
   autoMatchedId = null;
+  if (polygonFilter || polygonBounds) {
+    clearPolygonFilter();
+    return;
+  }
   clearMatches();
   clearClickGraphics();
 };

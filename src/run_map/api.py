@@ -198,7 +198,7 @@ def _warm_default_aggregates() -> None:
     position; both symbols resolve at call time.
     """
     for lod in _AGG_LODS:
-        sig = _cache_sig("aggregate", {"lod": lod})
+        sig = _cache_sig("aggregate2", {"lod": lod})
         p = _cache_path(sig)
         if p.exists():
             continue
@@ -406,22 +406,33 @@ def _build_index(**filters) -> bytes:
     return json.dumps({"activities": entries}).encode()
 
 
+# Worn-path buckets: how many distinct activities crossed a segment. The
+# frontend weights each bucket differently so habitual routes read heavier
+# than one-offs. Feature order low→high matters — Leaflet draws in order, so
+# the heavy lines paint on top.
+_AGG_BUCKETS = (("low", 1), ("mid", 10), ("high", float("inf")))
+
+
 def _build_aggregate(*, lod: str = _AGG_LOD_DEFAULT, **filters) -> bytes:
-    """Snap-to-grid + dedupe segments across every track.
+    """Snap-to-grid + dedupe segments across every track, bucketed by how
+    many activities traversed each segment (worn-path rendering).
 
     Each consecutive `(a, b)` pair in a track is snapped to the `_AGG_LODS[lod]`
     cell and normalised so `(a, b)` and `(b, a)` collide into the same key.
     No upstream simplification: Douglas-Peucker would pick different
     "important" vertices per track and produce ghost segments where two runs
     followed the same road — the dense, snap-to-cells walk dedupes properly.
+    A segment counts once per activity, however many times one track
+    re-crosses it.
     """
     rows = _filtered_rows("ST_AsGeoJSON(track)", **filters)
     grid = _AGG_LODS[lod]
-    seen: set = set()
-    segments: list[list[list[float]]] = []
+    visits: dict = {}
+    seg_of_key: dict = {}
     for (gj,) in rows:
         if not gj:
             continue
+        seen_this_track: set = set()
         prev = None
         for c in _coords_from_geojson(gj):
             snapped = (round(c[0] / grid) * grid, round(c[1] / grid) * grid)
@@ -431,15 +442,29 @@ def _build_aggregate(*, lod: str = _AGG_LOD_DEFAULT, **filters) -> bytes:
             if snapped == prev:
                 continue
             key = (prev, snapped) if prev < snapped else (snapped, prev)
-            if key not in seen:
-                seen.add(key)
-                segments.append([[prev[0], prev[1]], [snapped[0], snapped[1]]])
+            if key not in seen_this_track:
+                seen_this_track.add(key)
+                visits[key] = visits.get(key, 0) + 1
+                if key not in seg_of_key:
+                    seg_of_key[key] = [[prev[0], prev[1]], [snapped[0], snapped[1]]]
             prev = snapped
-    geometry = {"type": "MultiLineString", "coordinates": segments}
-    feature = {"type": "Feature", "geometry": geometry, "properties": {
-        "segment_count": len(segments),
-    }}
-    return json.dumps({"type": "FeatureCollection", "features": [feature]}).encode()
+
+    buckets: dict[str, list] = {name: [] for name, _ in _AGG_BUCKETS}
+    for key, n in visits.items():
+        for name, ceiling in _AGG_BUCKETS:
+            if n <= ceiling:
+                buckets[name].append(seg_of_key[key])
+                break
+    features = [
+        {
+            "type": "Feature",
+            "geometry": {"type": "MultiLineString", "coordinates": segs},
+            "properties": {"bucket": name, "segment_count": len(segs)},
+        }
+        for name, _ in _AGG_BUCKETS
+        for segs in [buckets[name]]
+    ]
+    return json.dumps({"type": "FeatureCollection", "features": features}).encode()
 
 
 def _build_heatmap(**filters) -> bytes:
@@ -483,7 +508,7 @@ def aggregate_geojson(
     _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km)
     sig = {**sig, "lod": lod}
     return _serve_cached(
-        _cache_sig("aggregate", sig),
+        _cache_sig("aggregate2", sig),
         lambda: _build_aggregate(lod=lod, date_start=date_start, date_end=date_end,
                                   type=type, min_km=min_km, max_km=max_km),
     )

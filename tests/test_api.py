@@ -99,6 +99,39 @@ def test_index_json_empty(app_client):
 # ---- /aggregate.geojson --------------------------------------------------
 
 
+def _agg_total(j: dict) -> int:
+    """Total deduped segments across all bucket features."""
+    return sum(f["properties"]["segment_count"] for f in j["features"])
+
+
+def test_aggregate_buckets_by_visit_count(app_client):
+    """The aggregate carries three worn-path buckets: segments visited once
+    ('low'), 2-10 times ('mid'), and >10 times ('high'), so the client can
+    weight habitual routes heavier than one-offs."""
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    shared = [(-1.50, 53.50), (-1.501, 53.502), (-1.503, 53.503),
+              (-1.505, 53.504), (-1.508, 53.506)]
+    lone = [(2.00, 48.00), (2.002, 48.001), (2.004, 48.003)]
+    _seed(conn, id=1, coords=shared)
+    _seed(conn, id=2, coords=shared)   # same path twice -> visits=2 -> mid
+    _seed(conn, id=3, coords=lone)     # once -> low
+
+    j = client.get("/aggregate.geojson").json()
+    by_bucket = {f["properties"]["bucket"]: f for f in j["features"]}
+    assert set(by_bucket) == {"low", "mid", "high"}
+
+    assert by_bucket["mid"]["properties"]["segment_count"] > 0, \
+        "the twice-run path must land in the mid bucket"
+    assert by_bucket["low"]["properties"]["segment_count"] > 0, \
+        "the once-run path must land in the low bucket"
+    assert by_bucket["high"]["properties"]["segment_count"] == 0
+
+    # A segment lives in exactly one bucket.
+    assert _agg_total(j) == sum(
+        len(f["geometry"]["coordinates"]) for f in j["features"])
+
+
 def test_aggregate_dedupes_overlapping_segments(app_client):
     """Two tracks that traverse the same path produce fewer segments in
     the aggregate than two non-overlapping tracks of the same length."""
@@ -112,7 +145,7 @@ def test_aggregate_dedupes_overlapping_segments(app_client):
     _seed(conn, id=1, coords=shared)
     _seed(conn, id=2, coords=shared)
     r_overlap = client.get("/aggregate.geojson")
-    overlap_segs = r_overlap.json()["features"][0]["properties"]["segment_count"]
+    overlap_segs = _agg_total(r_overlap.json())
 
     # Replace the duplicate with a disjoint track to act as the baseline.
     from run_map import api as api_mod
@@ -125,7 +158,7 @@ def test_aggregate_dedupes_overlapping_segments(app_client):
     )
     api_mod._invalidate_caches()
     r_disjoint = client.get("/aggregate.geojson")
-    disjoint_segs = r_disjoint.json()["features"][0]["properties"]["segment_count"]
+    disjoint_segs = _agg_total(r_disjoint.json())
 
     assert overlap_segs < disjoint_segs, \
         f"dedupe didn't shrink output: overlap={overlap_segs} vs disjoint={disjoint_segs}"
@@ -153,7 +186,7 @@ def test_aggregate_lod_grid_sizes(app_client):
     for lod in ("low", "mid", "high"):
         r = client.get(f"/aggregate.geojson?lod={lod}")
         assert r.status_code == 200
-        counts[lod] = r.json()["features"][0]["properties"]["segment_count"]
+        counts[lod] = _agg_total(r.json())
 
     assert counts["high"] > counts["mid"] > counts["low"], (
         f"LOD ordering broken: {counts}"
@@ -176,7 +209,7 @@ def test_aggregate_lod_cache_per_band(app_client):
     client.get("/aggregate.geojson?lod=mid")
     client.get("/aggregate.geojson?lod=high")
 
-    cache_files = sorted(p.name for p in api_mod._CACHE_DIR.glob("aggregate.*.json.gz"))
+    cache_files = sorted(p.name for p in api_mod._CACHE_DIR.glob("aggregate2.*.json.gz"))
     # Three distinct sig hashes, one per lod.
     assert len(cache_files) == 3, f"expected 3 lod cache files, got {cache_files}"
 
@@ -188,9 +221,9 @@ def test_warm_default_aggregates_writes_all_lods(app_client):
     _seed(conn, id=1, coords=_zigzag())
 
     api_mod._invalidate_caches()
-    assert not list(api_mod._CACHE_DIR.glob("aggregate.*.json.gz"))
+    assert not list(api_mod._CACHE_DIR.glob("aggregate2.*.json.gz"))
     api_mod._warm_default_aggregates()
-    cache_files = sorted(p.name for p in api_mod._CACHE_DIR.glob("aggregate.*.json.gz"))
+    cache_files = sorted(p.name for p in api_mod._CACHE_DIR.glob("aggregate2.*.json.gz"))
     assert len(cache_files) == 3, f"warm-up didn't pre-build all LODs: {cache_files}"
 
 
@@ -203,12 +236,12 @@ def test_aggregate_normalises_direction(app_client):
            (-1.505, 53.504), (-1.508, 53.506)]
     rev = list(reversed(fwd))
     _seed(conn, id=1, coords=fwd)
-    fwd_only = client.get("/aggregate.geojson").json()["features"][0]["properties"]["segment_count"]
+    fwd_only = _agg_total(client.get("/aggregate.geojson").json())
 
     _seed(conn, id=2, coords=rev)
     from run_map import api as api_mod
     api_mod._invalidate_caches()
-    both = client.get("/aggregate.geojson").json()["features"][0]["properties"]["segment_count"]
+    both = _agg_total(client.get("/aggregate.geojson").json())
 
     # Adding the reversed track shouldn't add new segments.
     assert both == fwd_only, f"reversed track added segments: {fwd_only} -> {both}"
@@ -305,15 +338,15 @@ def test_aggregate_filters_by_date_range(app_client):
     _seed(conn, id=2, start="2025-06-01T08:00:00",
           coords=[(2.0, 48.0), (2.002, 48.001), (2.003, 48.003)])
 
-    all_segs = client.get("/aggregate.geojson").json()["features"][0]["properties"]["segment_count"]
+    all_segs = _agg_total(client.get("/aggregate.geojson").json())
 
     # Window covering 2025 only — bounds are inclusive at both ends (start_time::DATE).
-    y2025 = client.get(
+    y2025 = _agg_total(client.get(
         "/aggregate.geojson?date_start=2025-01-01&date_end=2025-12-31"
-    ).json()["features"][0]["properties"]["segment_count"]
-    y2024 = client.get(
+    ).json())
+    y2024 = _agg_total(client.get(
         "/aggregate.geojson?date_start=2024-01-01&date_end=2024-12-31"
-    ).json()["features"][0]["properties"]["segment_count"]
+    ).json())
 
     assert y2025 < all_segs and y2024 < all_segs
     # Disjoint year windows should account for everything between them.
@@ -329,11 +362,11 @@ def test_aggregate_filters_open_ended_date(app_client):
 
     # `date_start` alone — open-ended on the upper side.
     after = client.get("/aggregate.geojson?date_start=2025-01-01").json()
-    assert after["features"][0]["properties"]["segment_count"] > 0
+    assert _agg_total(after) > 0
 
     # `date_end` alone — open-ended on the lower side.
     before = client.get("/aggregate.geojson?date_end=2024-12-31").json()
-    assert before["features"][0]["properties"]["segment_count"] > 0
+    assert _agg_total(before) > 0
 
 
 def test_filter_clause_rejects_bad_date(app_client):
@@ -567,14 +600,14 @@ def test_invalidate_caches_picks_up_new_tracks(app_client):
     _seed(conn, id=1)
 
     r1 = client.get("/aggregate.geojson")
-    seg1 = r1.json()["features"][0]["properties"]["segment_count"]
+    seg1 = _agg_total(r1.json())
 
     # New track on a totally disjoint path, then invalidate.
     _seed(conn, id=2, coords=[(2.00, 48.00), (2.001, 48.001), (2.002, 48.002)])
     api_mod._invalidate_caches()
 
     r2 = client.get("/aggregate.geojson")
-    seg2 = r2.json()["features"][0]["properties"]["segment_count"]
+    seg2 = _agg_total(r2.json())
     assert seg2 > seg1
 
     # /index.json invalidates alongside.

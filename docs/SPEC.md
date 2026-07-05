@@ -49,7 +49,7 @@ Both paths use `INSERT … ON CONFLICT (id) DO UPDATE`, so a re-import / re-sync
 | Method | Path | Purpose |
 |---|---|---|
 | GET  | `/`                       | Static index.html |
-| GET  | `/aggregate.geojson`      | Single MultiLineString of every road/trail you've run — snap-to-grid + dedupe. Three LODs via `?lod=low\|mid\|high` (~50 m / ~33 m / ~10 m), default `mid`. Filterable. Disk-cached per (lod, filter) combo, gzipped, `sendfile`-served. |
+| GET  | `/aggregate.geojson`      | Every road/trail you've run — snap-to-grid + dedupe, bucketed into three MultiLineString features by visit count (`bucket`: `low` = 1 activity, `mid` = 2–10, `high` = >10; each with a `segment_count`). Feature order low→high so heavy lines draw on top. Three LODs via `?lod=low\|mid\|high` (~50 m / ~33 m / ~10 m), default `mid`. Filterable. Disk-cached (name `aggregate2` — bumped when the payload format changed) per (lod, filter) combo, gzipped, `sendfile`-served. |
 | GET  | `/index.json`             | Per-activity samples + bbox + metadata. Feeds the hex overlay, view-fit, auto-match. Filterable. Disk-cached. |
 | GET  | `/heatmap.json`           | Densely-sampled lat/lng points (every ~30 m of real ground) for the heatmap overlay. Filterable. Disk-cached. |
 | GET  | `/match?lat=&lon=&r=`     | Activities whose track passes within `r` metres of (lat, lon). Includes simplified polyline geometry per match so the client can render the precise red track without holding the bulk track set. Filterable. |
@@ -72,6 +72,7 @@ Both paths use `INSERT … ON CONFLICT (id) DO UPDATE`, so a re-import / re-sync
 `/aggregate.geojson`, `/index.json`, `/heatmap.json`, `/match`, `/match/polygon` all accept the same attribute filters:
 
 - `date_start`, `date_end` — ISO `YYYY-MM-DD`, inclusive on both ends; either can be omitted for an open-ended window. Bad input → 400.
+- `/match`'s radius is isotropic: longitudes are cos(lat)-scaled on both sides of the `ST_DWithin` test so `r` metres reaches equally far in every direction.
 - `type` — `Run` (road), `TrailRun`, or `Hike` (hikes + walks); accepts a comma-separated list (`type=Run,Hike`) which becomes a SQL `IN`. List order doesn't matter — values are sorted before hitting the WHERE clause and the cache signature.
 - `min_km`, `max_km` — distance window in km
 
@@ -88,7 +89,7 @@ DuckDB connections are **per-thread** (`threading.local`), since one connection 
 - **Below the toolbar (left rail)**: always-visible Road / Trail / Hike pills. Click to toggle; all off shows a small "(i) All tracks hidden" notice and removes the aggregate / hex / match layers.
 - **Top-centre**: filter chip bar — active date and distance chips with × to remove. Type is carried by the pills, so it gets no chip.
 - **Bottom-left**: brand pill (`run-map`) and ⚙ button. Settings drawer slides from the left and now holds only data/click-behaviour controls (search radius, lock-to-track, zoom-to-fit, Strava API, ZIP import, library stats).
-- **Top-right (right rail)**: Matches panel (capped at 50 vh) above, Strava-preview panel below. Both pinned with × to dismiss. On mobile (≤700 px) the rail spans top with a 56 px gutter on the left so the Leaflet toolbar stays reachable, and the preview's stats and photo become a two-page horizontal scroll-snap carousel with dot indicators.
+- **Top-right (right rail)**: Matches panel (capped at 50 vh) above, Strava-preview panel below. Multi-match results open with a sticky summary line ("N matches · first → last · newest first") and year-separator rows in the table; dismissing polygon-derived matches via the panel's × also clears the drawn polygon. Both pinned with × to dismiss. On mobile (≤700 px) the rail spans top with a 56 px gutter on the left so the Leaflet toolbar stays reachable, and the preview's stats and photo become a two-page horizontal scroll-snap carousel with dot indicators.
 
 ### Boot data flow
 
@@ -101,7 +102,7 @@ Per-track geometry is never loaded in bulk. Match polylines arrive inline with `
 ### Layer stack
 
 - **z < 11**: H3 hex overlay coloured white→red by activity count per cell. Click a cell to fly-to-bounds of its tracks.
-- **z ≥ 11, idle**: aggregate layer (single blue GeoJSON, weight 2.5, opacity 0.85), swapped between three LODs by zoom band:
+- **z ≥ 11, idle**: aggregate layer — worn-path rendering: one blue hue, with per-bucket weight/opacity so habitual routes read heavier than one-offs (low 1.4/0.45, mid 2.5/0.8, high 3.6/0.95). Swapped between three LODs by zoom band:
     - z 11–13: `low` (~50 m grid)
     - z 14–15: `mid` (~33 m grid)
     - z 16+: `high` (~10 m grid)

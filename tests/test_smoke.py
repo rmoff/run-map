@@ -39,6 +39,18 @@ def _seed_map(page: Page, app_url: str):
     page.wait_for_timeout(200)
 
 
+def _let_popovers_close(page: Page):
+    """Move the pointer to neutral ground and wait for the hover popovers'
+    grace timer to close them. A click that lands while a popover is open is
+    (deliberately) consumed as a dismissal, not a map interaction."""
+    page.mouse.move(600, 760)
+    for menu_id in ("display-menu", "filter-menu"):
+        page.wait_for_function(
+            f"() => document.getElementById('{menu_id}').classList.contains('hidden')",
+            timeout=3_000,
+        )
+
+
 def _click_centre_of_map(page: Page):
     bb = page.locator("#map").bounding_box()
     assert bb, "#map not found"
@@ -203,7 +215,9 @@ def test_dim_opacity_setting(page: Page, app_url):
     page.locator("#display-menu").wait_for(state="visible", timeout=3_000)
     expect(page.locator("#dim-opacity")).to_have_value("45")
 
-    # Trigger a match so the aggregate gets dimmed.
+    # Trigger a match so the aggregate gets dimmed. Let the popover close
+    # first — clicks that land while it's open only dismiss it.
+    _let_popovers_close(page)
     _click_centre_of_map(page)
     _assert_something_responded(page)
 
@@ -317,7 +331,9 @@ def test_heatmap_hides_on_match(page: Page, app_url):
     page.check("#heatmap-toggle")
     page.wait_for_function("() => window.__rm.heatmapOn()", timeout=10_000)
 
-    # Click the centre of the map — should produce matches.
+    # Click the centre of the map — should produce matches. Let the popover
+    # close first — clicks that land while it's open only dismiss it.
+    _let_popovers_close(page)
     bb = page.locator("#map").bounding_box()
     page.mouse.click(bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2)
     page.wait_for_selector(
@@ -486,6 +502,123 @@ def test_type_pill_all_off_hides_tracks(page: Page, app_url):
     road.click()
     expect(notice).to_be_hidden()
     page.wait_for_function("() => window.__rm.aggregateOn()", timeout=8_000)
+
+
+def test_popover_dismiss_click_does_not_fire_match(page: Page, app_url):
+    """Clicking the map to close an open popover must ONLY close the popover —
+    it must not drop a pin and run a match query underneath."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    page.locator('a[title="Filter"]').hover()
+    page.locator("#filter-menu").wait_for(state="visible", timeout=3_000)
+    # Move pointer away from the funnel first so hover-close isn't a factor,
+    # then dismiss by clicking the map.
+    _click_centre_of_map(page)
+    page.locator("#filter-menu").wait_for(state="hidden", timeout=3_000)
+    page.wait_for_timeout(1_500)
+    assert page.evaluate("() => window.__rm.matchCount()") == 0, \
+        "dismissing a popover must not trigger a match"
+    assert page.evaluate("() => document.querySelectorAll('.click-pin').length") == 0, \
+        "dismissing a popover must not drop a click pin"
+
+
+def test_filter_change_keeps_old_aggregate_until_swap(page: Page, app_url):
+    """Toggling a type pill must not blank the map — the old aggregate stays
+    on screen until the new one is built, then they swap."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    page.click('#type-pills [data-type="Run"]')
+    # Immediately after the click the old layer must still be attached
+    # (the old code removed it synchronously in the click tick).
+    assert page.evaluate("() => window.__rm.aggregateOn()"), \
+        "aggregate must stay visible while the filtered layer loads"
+    # And once the new layer lands, it's attached too.
+    page.wait_for_timeout(4_000)
+    assert page.evaluate("() => window.__rm.aggregateOn()")
+
+
+def test_closing_matches_panel_clears_polygon(page: Page, app_url):
+    """Dismissing polygon-derived matches via the panel's × must clear the
+    drawn polygon too — no stranded outline pretending to be a filter."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    page.evaluate(
+        """() => {
+            const c = window.__rm.map.getCenter();
+            const d = 0.004;
+            const ring = [
+                L.latLng(c.lat - d, c.lng - d), L.latLng(c.lat - d, c.lng + d),
+                L.latLng(c.lat + d, c.lng + d), L.latLng(c.lat + d, c.lng - d),
+            ];
+            window.__rm.map.fire(L.Draw.Event.CREATED, { layer: L.polygon(ring), layerType: 'polygon' });
+        }"""
+    )
+    page.wait_for_selector("#matches-panel:not(.hidden)", timeout=15_000)
+    page.click("#matches-close")
+    page.wait_for_timeout(500)
+    assert page.evaluate("() => document.querySelectorAll('.polygon-close-btn').length") == 0, \
+        "polygon close button must be removed with the matches"
+    assert not page.evaluate("() => location.hash.includes('poly=')"), \
+        "polygon filter must be cleared from the URL state"
+
+
+def test_matches_panel_has_summary_header(page: Page, app_url):
+    """A multi-match result opens with a count + date-span summary line and
+    year separator rows — the 'when?' answer before any scrolling."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    page.evaluate(
+        """() => {
+            const c = window.__rm.map.getCenter();
+            const d = 0.004;
+            const ring = [
+                L.latLng(c.lat - d, c.lng - d), L.latLng(c.lat - d, c.lng + d),
+                L.latLng(c.lat + d, c.lng + d), L.latLng(c.lat + d, c.lng - d),
+            ];
+            window.__rm.map.fire(L.Draw.Event.CREATED, { layer: L.polygon(ring), layerType: 'polygon' });
+        }"""
+    )
+    page.wait_for_selector("#matches-panel:not(.hidden)", timeout=15_000)
+    page.wait_for_selector(".matches-summary", timeout=5_000)
+    summary = page.locator(".matches-summary").inner_text()
+    count = page.evaluate("() => window.__rm.matchCount()")
+    assert str(count) in summary and "matches" in summary, summary
+    assert "→" in summary, f"summary should carry a first→last span: {summary}"
+    seps = page.evaluate("() => document.querySelectorAll('.matches-table tr.year-sep').length")
+    assert seps >= 1, "year separator rows should be present"
+
+
+def test_worn_path_bucket_styles_render(page: Page, app_url):
+    """The aggregate renders as three worn-path buckets with distinct stroke
+    weights (habitual routes heavier than one-offs)."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    weights = page.evaluate(
+        """() => {
+            const seen = new Set();
+            for (const k in window.__rm.map._layers) {
+                const l = window.__rm.map._layers[k];
+                if (l.options && l.options.pane === 'aggPane' && l.options.weight) {
+                    seen.add(l.options.weight);
+                }
+            }
+            return Array.from(seen).sort();
+        }"""
+    )
+    assert len(weights) == 3, f"expected 3 bucket weights, got {weights}"
+
+
+def test_stats_content_id_is_unique(page: Page, app_url):
+    """index.html previously duplicated id="stats-content"; getElementById
+    silently binds the first, leaving the second an unstylable landmine."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+    assert page.evaluate("() => document.querySelectorAll('#stats-content').length") == 1
 
 
 def test_all_types_off_survives_zoom(page: Page, app_url):

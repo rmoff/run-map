@@ -85,7 +85,7 @@ body {
   right: 4px;
   font-size: 1.1rem;
   color: #888;
-  z-index: 1;
+  z-index: 2;  /* above the sticky .matches-summary */
 }
 #matches-header {
   padding: 8px 14px 4px;
@@ -108,6 +108,22 @@ body {
 .seg-btn:hover:not(.active) { background: #f0f6fb; }
 #matches-content { padding: 10px 14px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 
+.matches-summary {
+  padding: 6px 28px 4px 8px;  /* right gap keeps clear of the × button */
+  font-size: .8rem;
+  color: #555;
+  border-bottom: 1px solid #eee;
+  position: sticky; top: 0; background: #fff; z-index: 1;
+}
+.matches-table tr.year-sep td {
+  padding: 6px 8px 2px;
+  font-size: .7rem;
+  font-weight: 600;
+  letter-spacing: .06em;
+  color: #999;
+  background: #fafafa;
+  cursor: default;
+}
 .matches-table { width: 100%; border-collapse: collapse; }
 .matches-table td {
   padding: 4px 6px;
@@ -176,6 +192,9 @@ fieldset label { display: inline-block; margin-right: 12px; }
 .check-row input { width: auto; margin: 0; }
 .check-row.disabled { opacity: 0.45; cursor: not-allowed; }
 .check-row.disabled input { cursor: not-allowed; }
+/* A disabled button must look dead — it previously kept its full primary
+   styling and pointer cursor. */
+button:disabled { opacity: 0.45; cursor: default; }
 
 input[type="text"], input:not([type]), input[type="password"], input[type="file"], select {
   width: 100%;
