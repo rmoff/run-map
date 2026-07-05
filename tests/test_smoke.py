@@ -959,6 +959,25 @@ def test_hex_view_at_low_zoom(page: Page, app_url):
     assert page.evaluate("() => window.__rm.hexOn()"), "hex layer not active at low zoom"
 
 
+def test_hex_click_drills_into_track_view(page: Page, app_url):
+    """One hex click lands in track view (z >= 11), however coarse the hex.
+    Fitting only the hex's own bounds left country-level clicks stuck in
+    hex view, reading as 'nothing happened'."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    base = app_url.split("#")[0]
+    page.goto(f"{base}#z=7&ll=53.93,-1.82", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => window.__rm && window.__rm.hexOn && window.__rm.hexOn()",
+        timeout=20_000,
+    )
+    bb = page.locator("#map").bounding_box()
+    page.mouse.click(bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2)
+    page.wait_for_function(
+        "() => window.__rm.map.getZoom() >= 11 && window.__rm.aggregateOn()",
+        timeout=10_000,
+    )
+
+
 # ---------- Mobile ----------------------------------------------------------
 
 

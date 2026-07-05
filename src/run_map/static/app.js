@@ -289,10 +289,13 @@ document.addEventListener('click', e => {
 // segments by how many activities crossed them, and habitual routes draw
 // heavier than one-offs (single hue; weight + opacity carry the frequency).
 const STYLE_AGG = { color: '#1a5a8a', weight: 2.5, opacity: 0.85 };
+// The low bucket must stay clearly legible — at 1.4/0.45 a one-off
+// multi-day route washed out against OpenTopoMap's own thin blue streams
+// and effectively vanished. Frequency reads mostly through weight.
 const AGG_BUCKET_STYLES = {
-  low:  { color: '#1a5a8a', weight: 1.4, opacity: 0.45 },
-  mid:  { color: '#1a5a8a', weight: 2.5, opacity: 0.8 },
-  high: { color: '#1a5a8a', weight: 3.6, opacity: 0.95 },
+  low:  { color: '#1a5a8a', weight: 2.0, opacity: 0.7 },
+  mid:  { color: '#1a5a8a', weight: 2.8, opacity: 0.85 },
+  high: { color: '#1a5a8a', weight: 4.0, opacity: 0.95 },
 };
 function _styleAggFor(feat) {
   return AGG_BUCKET_STYLES[feat?.properties?.bucket] || STYLE_AGG;
@@ -808,12 +811,13 @@ function renderHexes() {
         pushHistoryCheckpoint();
         // Zoom to the hex itself — using the tracks' bounding box surprised
         // users when the contained tracks extend well beyond the hex outline
-        // (or when a long track's bbox dwarfs the cell).
-        map.flyToBounds(layer.getBounds(), {
-          maxZoom: 16,
-          padding: [40, 40],
-          duration: 0.7,
-        });
+        // (or when a long track's bbox dwarfs the cell). But land at least
+        // in track view: fitting a coarse hex's own bounds stops short of
+        // the threshold and reads as "the click did nothing".
+        const b = layer.getBounds();
+        const fitZoom = map.getBoundsZoom(b, false, L.point(40, 40));
+        const target = Math.min(Math.max(fitZoom, HEX_ZOOM_THRESHOLD), 16);
+        map.flyTo(b.getCenter(), target, { duration: 0.7 });
       });
     },
   }).addTo(map);
