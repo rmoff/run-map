@@ -427,7 +427,9 @@ def test_filter_clause_multi_type_sig_deterministic(app_client):
 
     where, params, sig = api_mod._filter_clause(type="Run")
     assert sig["type"] == "Run"
-    assert where == ["type = ?"] and params == ["Run"]
+    # The serve-time hike gate is always the first clause; the type filter
+    # follows as a single equality.
+    assert "type = ?" in where and "Run" in params
 
 
 def test_index_unknown_type_returns_empty(app_client):
@@ -520,6 +522,64 @@ def test_stats_counts_three_type_buckets(app_client):
     by_year = {y["year"]: y for y in j["yearly"]}
     assert by_year[2024] == {"year": 2024, "trail": 1, "hike": 1, "road": 2}
     assert by_year[2025] == {"year": 2025, "trail": 0, "hike": 1, "road": 0}
+
+
+# ---- Serve-time hike threshold ---------------------------------------------
+
+
+def _seed_dist(conn, *, id: int, type_: str, distance_m: float, coords, start="2025-01-01T08:00:00"):
+    from run_map import db as db_mod
+    wkt_pts = ", ".join(f"{x} {y}" for x, y in coords)
+    db_mod.upsert_activity(
+        conn, id=id, start_time=datetime.fromisoformat(start),
+        name=f"A{id}", distance_m=distance_m, moving_time_s=1800, type=type_,
+        strava_url=f"https://x/{id}", source="test",
+        track_wkt=f"LINESTRING({wkt_pts})",
+    )
+
+
+def test_short_hikes_are_stored_but_not_served(app_client):
+    """Hikes/walks import at any length, but everything the map serves
+    excludes hikes under the threshold (default 5 km). Short runs are
+    unaffected."""
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed_dist(conn, id=1, type_="Hike", distance_m=3000.0,
+               coords=[(-1.5, 53.5), (-1.501, 53.502)])
+    _seed_dist(conn, id=2, type_="Hike", distance_m=8000.0,
+               coords=[(2.0, 48.0), (2.002, 48.001)])
+    _seed_dist(conn, id=3, type_="Run", distance_m=3000.0,
+               coords=[(3.0, 47.0), (3.002, 47.001)])
+
+    idx = client.get("/index.json").json()
+    assert {a["id"] for a in idx["activities"]} == {2, 3}, \
+        "short hike must be hidden; short run must not"
+
+    m = client.get("/match", params={"lat": 53.501, "lon": -1.5005, "r": 200}).json()
+    assert m == [], "short hike must not match"
+
+    stats = client.get("/stats").json()
+    assert stats["count"] == 2
+    assert stats["yearly"][0]["hike"] == 1
+
+
+def test_hike_threshold_env_override(app_client, monkeypatch, tmp_path):
+    """RUN_MAP_HIKE_MIN_KM changes the serve-time gate without re-import."""
+    client, db_mod, api_mod = app_client
+    conn = db_mod.connect()
+    _seed_dist(conn, id=1, type_="Hike", distance_m=3000.0,
+               coords=[(-1.5, 53.5), (-1.501, 53.502)])
+
+    monkeypatch.setenv("RUN_MAP_HIKE_MIN_KM", "2")
+    import importlib
+    importlib.reload(api_mod)
+    from fastapi.testclient import TestClient
+    api_mod._CACHE_DIR = tmp_path / "cache2"
+    client2 = TestClient(api_mod.app)
+
+    idx = client2.get("/index.json").json()
+    assert {a["id"] for a in idx["activities"]} == {1}, \
+        "a 3 km hike must be served when the threshold is 2 km"
 
 
 # ---- Sync state machine ----------------------------------------------------

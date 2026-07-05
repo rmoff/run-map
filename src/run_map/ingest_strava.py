@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 
 from . import db
-from .activity_types import IMPORT_TYPES, canonical_type, passes_import_gate
+from .activity_types import IMPORT_TYPES, canonical_type
 from .parsers import points_to_linestring_wkt
 
 
@@ -228,11 +228,10 @@ def sync_with_tokens(
             for i, a in enumerate(activities, start=1):
                 raw_type = _activity_type(a)
                 a_type = canonical_type(raw_type)
-                # Type + distance gates use the summary payload only, so a
-                # rejected activity never costs a stream API call.
-                if raw_type not in IMPORT_TYPES or not passes_import_gate(
-                    a_type, float(a.get("distance") or 0.0)
-                ):
+                # Type gate uses the summary payload only, so a rejected
+                # activity never costs a stream API call. Distance is NOT
+                # gated here — the hike threshold is applied at serve time.
+                if raw_type not in IMPORT_TYPES:
                     skipped += 1
                     _report("processing", i, total)
                     continue

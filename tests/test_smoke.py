@@ -226,7 +226,7 @@ def test_dim_opacity_setting(page: Page, app_url):
             const lod = window.__rm.aggregateLod();
             const m = window.__rm.map;
             let found = null;
-            m.eachLayer(l => { if (l.options && l.options.color === '#1a5a8a' && l.options.opacity != null) found = l.options.opacity; });
+            m.eachLayer(l => { if (l.options && l.options.color === '#0d3457' && l.options.opacity != null) found = l.options.opacity; });
             return found;
         }"""
     )
@@ -244,7 +244,7 @@ def test_dim_opacity_setting(page: Page, app_url):
         """() => {
             const m = window.__rm.map;
             let found = null;
-            m.eachLayer(l => { if (l.options && l.options.color === '#1a5a8a' && l.options.opacity != null) found = l.options.opacity; });
+            m.eachLayer(l => { if (l.options && l.options.color === '#0d3457' && l.options.opacity != null) found = l.options.opacity; });
             return found;
         }"""
     )

@@ -40,7 +40,7 @@ Tracks are simplified at ingest with `shapely.simplify(1e-5)` to ~1 m precision.
 1. **Bulk import** — read an unzipped Strava export (CSV + GPX/FIT files), filter to the import set below, upsert. Zero API cost.
 2. **Incremental Strava API sync** — OAuth paste-code flow, `/athlete/activities` + per-activity `latlng` streams. Uses `sport_type` (not the legacy `type`) so TrailRun isn't collapsed into Run. Includes 429 / daily-rate-limit handling.
 
-**Import set** (shared vocabulary in `activity_types.py`): `Run` and `TrailRun` at any distance; `Hike` and `Walk` only when distance > 5 km. Hike and Walk are one activity type — both are stored under the canonical `type` value `Hike`. The distance gate uses the CSV distance (bulk) or the summary `distance` field (API sync, checked *before* the expensive stream fetch, so rejected activities cost no extra API calls). Hikes with no recorded distance are skipped.
+**Import set** (shared vocabulary in `activity_types.py`): `Run`, `TrailRun`, `Hike`, `Walk` — all at any distance. Hike and Walk are one activity type — both are stored under the canonical `type` value `Hike`. The hike/walk minimum distance is a **serve-time** gate (`RUN_MAP_HIKE_MIN_KM`, default 5): short hikes are stored but excluded from every map/match/stats query, so changing the threshold needs only a container restart, never a re-import. Note the API-sync cost of importing everything: each walk costs one streams call, so a full-history sync burns quota proportional to your walk count.
 
 Both paths use `INSERT … ON CONFLICT (id) DO UPDATE`, so a re-import / re-sync overwrites every field including `type`. Note that the incremental sync resumes from `max(start_time)` — hikes older than the newest activity in the DB only appear after a "From the beginning" sync or a bulk re-import.
 
@@ -73,6 +73,7 @@ Both paths use `INSERT … ON CONFLICT (id) DO UPDATE`, so a re-import / re-sync
 
 - `date_start`, `date_end` — ISO `YYYY-MM-DD`, inclusive on both ends; either can be omitted for an open-ended window. Bad input → 400.
 - `/match`'s radius is isotropic: longitudes are cos(lat)-scaled on both sides of the `ST_DWithin` test so `r` metres reaches equally far in every direction.
+- Every filtered query (and `/stats`) carries a baseline clause excluding hikes below `RUN_MAP_HIKE_MIN_KM`; the threshold is part of every cache signature.
 - `type` — `Run` (road), `TrailRun`, or `Hike` (hikes + walks); accepts a comma-separated list (`type=Run,Hike`) which becomes a SQL `IN`. List order doesn't matter — values are sorted before hitting the WHERE clause and the cache signature.
 - `min_km`, `max_km` — distance window in km
 
@@ -102,7 +103,7 @@ Per-track geometry is never loaded in bulk. Match polylines arrive inline with `
 ### Layer stack
 
 - **z < 11**: H3 hex overlay coloured white→red by activity count per cell. Click a cell to fly-to-bounds of its tracks.
-- **z ≥ 11, idle**: aggregate layer — worn-path rendering: one blue hue, with per-bucket weight/opacity so habitual routes read heavier than one-offs (low 1.4/0.45, mid 2.5/0.8, high 3.6/0.95). Swapped between three LODs by zoom band:
+- **z ≥ 11, idle**: aggregate layer — worn-path rendering: one dark-navy hue (`#0d3457`, deliberately darker than the basemaps' hydrography blues so tracks never read as rivers), with per-bucket weight/opacity so habitual routes read heavier than one-offs (low 2.0/0.7, mid 2.8/0.85, high 4.0/0.95). Swapped between three LODs by zoom band:
     - z 11–13: `low` (~50 m grid)
     - z 14–15: `mid` (~33 m grid)
     - z 16+: `high` (~10 m grid)

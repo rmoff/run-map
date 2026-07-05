@@ -6,6 +6,7 @@ import asyncio
 import gzip
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 import threading
@@ -95,6 +96,12 @@ def _parse_iso_date(s: str, field: str) -> str:
     return s
 
 
+# Serve-time hike/walk threshold: everything imports, but the map only shows
+# hikes of at least this distance. Configurable without re-import.
+_HIKE_MIN_M = float(os.environ.get("RUN_MAP_HIKE_MIN_KM", "") or
+                    activity_types.HIKE_MIN_DISTANCE_M / 1000.0) * 1000.0
+
+
 def _filter_clause(
     date_start: str | None = None,
     date_end: str | None = None,
@@ -102,9 +109,11 @@ def _filter_clause(
     min_km: float | None = None,
     max_km: float | None = None,
 ) -> tuple[list[str], list, dict]:
-    where: list[str] = []
-    params: list = []
-    sig: dict = {}
+    # Baseline gate on every map/match query: short hikes are stored (so the
+    # threshold can change without a re-sync) but never served.
+    where: list[str] = ["NOT (type = ? AND distance_m < ?)"]
+    params: list = [activity_types.CANONICAL_HIKE, _HIKE_MIN_M]
+    sig: dict = {"hike_min_m": _HIKE_MIN_M}
     if date_start:
         ds = _parse_iso_date(date_start, "date_start")
         where.append("start_time::DATE >= ?")
@@ -198,7 +207,9 @@ def _warm_default_aggregates() -> None:
     position; both symbols resolve at call time.
     """
     for lod in _AGG_LODS:
-        sig = _cache_sig("aggregate2", {"lod": lod})
+        # Same baseline sig (incl. the hike threshold) as live requests use.
+        _, _, base_sig = _filter_clause()
+        sig = _cache_sig("aggregate2", {**base_sig, "lod": lod})
         p = _cache_path(sig)
         if p.exists():
             continue
@@ -251,8 +262,11 @@ def count() -> dict:
 
 @app.get("/stats")
 def stats() -> dict:
+    # Stats respect the serve-time hike threshold so the numbers match the map.
     row = _db_fetchone(
-        "SELECT count(*), min(start_time), max(start_time) FROM activities"
+        "SELECT count(*), min(start_time), max(start_time) FROM activities "
+        "WHERE NOT (type = 'Hike' AND distance_m < ?)",
+        [_HIKE_MIN_M],
     )
     yearly = _db_fetchall(
         """
@@ -261,9 +275,10 @@ def stats() -> dict:
                SUM(CASE WHEN type = 'Hike' THEN 1 ELSE 0 END) AS hike,
                SUM(CASE WHEN type NOT IN ('TrailRun', 'Hike') THEN 1 ELSE 0 END) AS road
         FROM activities
-        WHERE start_time IS NOT NULL
+        WHERE start_time IS NOT NULL AND NOT (type = 'Hike' AND distance_m < ?)
         GROUP BY 1 ORDER BY 1
-        """
+        """,
+        [_HIKE_MIN_M],
     )
     return {
         "count": int(row[0] or 0),
@@ -738,7 +753,7 @@ def _run_sync_thread(tokens: dict, since: int | None) -> None:
                 "inserted": inserted, "skipped": skipped,
                 "message": (
                     f"Synced {inserted} activities"
-                    + (f" · {skipped} skipped (other sports, hikes/walks ≤ 5 km, no GPS)"
+                    + (f" · {skipped} skipped (other sports / no GPS)"
                        if skipped else "")
                 ),
                 "error": None,

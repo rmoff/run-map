@@ -14,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from . import db
-from .activity_types import IMPORT_TYPES, canonical_type, passes_import_gate
+from .activity_types import IMPORT_TYPES, canonical_type
 from .parsers import parse_track_file
 
 
@@ -90,10 +90,6 @@ def ingest(export_dir: Path, *, progress_cb=None) -> tuple[int, int]:
                 except (TypeError, ValueError):
                     distance_m = 0.0
                 a_type = canonical_type(str(row["type"]))
-                if not passes_import_gate(a_type, distance_m):
-                    skipped += 1
-                    continue
-
                 track_path = _find_track_file(export_dir, str(row.get("filename", "")))
                 if not track_path:
                     skipped += 1

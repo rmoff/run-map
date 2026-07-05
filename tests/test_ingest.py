@@ -57,7 +57,9 @@ def _stored_types(db_mod) -> dict[int, str]:
         conn.close()
 
 
-def test_bulk_ingest_admits_long_hikes_and_walks(fresh_db, tmp_path):
+def test_bulk_ingest_admits_all_hikes_and_walks(fresh_db, tmp_path):
+    """Hikes/walks of ANY length import (Walk normalised to Hike) — the
+    distance threshold is applied at serve time, not ingest."""
     from run_map import ingest_bulk
     importlib.reload(ingest_bulk)
 
@@ -71,11 +73,9 @@ def test_bulk_ingest_admits_long_hikes_and_walks(fresh_db, tmp_path):
     inserted, skipped = ingest_bulk.ingest(export)
 
     stored = _stored_types(fresh_db)
-    assert stored == {1: "Run", 2: "Hike", 3: "Hike"}
-    assert inserted == 3
-    # The short walk is skipped by the distance gate (the Ride never enters
-    # the loop — it's dropped by the type filter, not counted as skipped).
-    assert skipped == 1
+    assert stored == {1: "Run", 2: "Hike", 3: "Hike", 4: "Hike"}
+    assert inserted == 4
+    assert skipped == 0  # the Ride is dropped by the type filter pre-loop
 
 
 def test_bulk_ingest_missing_csv_raises_normal_exception(fresh_db, tmp_path):
@@ -116,7 +116,7 @@ def test_bulk_ingest_survives_corrupt_rows(fresh_db, tmp_path):
     assert skipped == 1
 
 
-def test_strava_sync_admits_long_hikes_and_gates_short_ones(fresh_db, monkeypatch):
+def test_strava_sync_admits_all_hikes(fresh_db, monkeypatch):
     from run_map import ingest_strava
     importlib.reload(ingest_strava)
 
@@ -144,9 +144,8 @@ def test_strava_sync_admits_long_hikes_and_gates_short_ones(fresh_db, monkeypatc
     inserted, skipped = ingest_strava.sync_with_tokens({"access_token": "t"})
 
     stored = _stored_types(fresh_db)
-    assert stored == {10: "Run", 11: "Hike"}
-    assert inserted == 2
-    assert skipped == 2
-    # The gate must fire before the expensive stream fetch: no stream call
-    # for the short hike or the ride.
-    assert sorted(stream_calls) == [10, 11]
+    assert stored == {10: "Run", 11: "Hike", 12: "Hike"}
+    assert inserted == 3
+    assert skipped == 1  # the ride
+    # No stream call for the ride — the type filter still fires pre-fetch.
+    assert sorted(stream_calls) == [10, 11, 12]

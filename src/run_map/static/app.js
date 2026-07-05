@@ -288,14 +288,17 @@ document.addEventListener('click', e => {
 // a "street map of your runs". Worn-path rendering: the server buckets
 // segments by how many activities crossed them, and habitual routes draw
 // heavier than one-offs (single hue; weight + opacity carry the frequency).
-const STYLE_AGG = { color: '#1a5a8a', weight: 2.5, opacity: 0.85 };
+// Dark navy — deliberately darker than any of the basemaps' own blues
+// (OpenTopoMap streams/rivers) so tracks never read as hydrology.
+const AGG_COLOR = '#0d3457';
+const STYLE_AGG = { color: AGG_COLOR, weight: 2.5, opacity: 0.85 };
 // The low bucket must stay clearly legible — at 1.4/0.45 a one-off
 // multi-day route washed out against OpenTopoMap's own thin blue streams
 // and effectively vanished. Frequency reads mostly through weight.
 const AGG_BUCKET_STYLES = {
-  low:  { color: '#1a5a8a', weight: 2.0, opacity: 0.7 },
-  mid:  { color: '#1a5a8a', weight: 2.8, opacity: 0.85 },
-  high: { color: '#1a5a8a', weight: 4.0, opacity: 0.95 },
+  low:  { color: AGG_COLOR, weight: 2.0, opacity: 0.7 },
+  mid:  { color: AGG_COLOR, weight: 2.8, opacity: 0.85 },
+  high: { color: AGG_COLOR, weight: 4.0, opacity: 0.95 },
 };
 function _styleAggFor(feat) {
   return AGG_BUCKET_STYLES[feat?.properties?.bucket] || STYLE_AGG;
@@ -305,7 +308,7 @@ const STYLE_AGG_DIM_WEIGHT = 2.0;
 function _styleAggDim() {
   const el = document.getElementById('dim-opacity');
   const op = el ? Number(el.value) / 100 : STYLE_AGG_DIM_DEFAULT;
-  return { color: '#1a5a8a', weight: STYLE_AGG_DIM_WEIGHT, opacity: op };
+  return { color: AGG_COLOR, weight: STYLE_AGG_DIM_WEIGHT, opacity: op };
 }
 // Match polylines — precise track geometry returned by /match*, drawn on top
 // of the aggregate when a click/polygon selects runs.
