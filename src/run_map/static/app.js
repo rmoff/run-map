@@ -2618,6 +2618,10 @@ async function applyURLState({ animate } = { animate: false }) {
     min_km: saved?.filterMinKm ?? null,
     max_km: saved?.filterMaxKm ?? null,
   };
+  // "All pills off" is client-only and never serialised into the hash, so a
+  // restored URL is by definition not in that state. Without this reset,
+  // browser-back after all-off leaves the ghost notice over live pills.
+  _allTypesOff = false;
   renderFilterChips();
   _syncTypePills();
   invalidateHeatmapData();

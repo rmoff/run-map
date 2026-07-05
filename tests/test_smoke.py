@@ -621,6 +621,26 @@ def test_stats_content_id_is_unique(page: Page, app_url):
     assert page.evaluate("() => document.querySelectorAll('#stats-content').length") == 1
 
 
+def test_browser_back_clears_all_types_off_ghost(page: Page, app_url):
+    """Going all-pills-off pushes a history checkpoint; browser back must
+    fully restore the previous state — no stuck 'All tracks hidden' notice
+    over lit pills."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+
+    for t in ("Run", "TrailRun", "Hike"):
+        page.click(f'#type-pills [data-type="{t}"]')
+    expect(page.locator("#type-empty-notice")).to_be_visible()
+
+    # Back pops to the state before the final click: Hike-only.
+    page.go_back()
+    expect(page.locator("#type-empty-notice")).to_be_hidden()
+    expect(page.locator('#type-pills [data-type="Run"]')).not_to_have_class("type-pill active")
+    expect(page.locator('#type-pills [data-type="TrailRun"]')).not_to_have_class("type-pill active")
+    expect(page.locator('#type-pills [data-type="Hike"]')).to_have_class("type-pill active")
+    page.wait_for_function("() => window.__rm.aggregateOn()", timeout=10_000)
+
+
 def test_all_types_off_survives_zoom(page: Page, app_url):
     """The 'All tracks hidden' state must hold across zoom changes: zooming
     below the hex threshold must not render hexes, and zooming back in must
