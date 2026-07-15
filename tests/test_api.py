@@ -818,3 +818,48 @@ def test_opt_helpers_handle_nan():
     assert ingest_bulk._opt_str(float("nan")) is None
     assert ingest_bulk._opt_str("  Brooks  ") == "Brooks"
     assert ingest_bulk._opt_str("") is None
+
+
+# ---- Strava API sync enrichment --------------------------------------------
+
+
+def test_gear_names_from_athlete_payload():
+    from run_map import ingest_strava
+    athlete = {
+        "shoes": [
+            {"id": "g123", "name": "Brooks Ghost 15"},
+            {"id": "g456", "name": "  Inov-8 TrailFly Ultra G300 "},
+            {"id": "g789", "name": ""},          # unnamed -> skipped
+            {"name": "no id"},                    # no id -> skipped
+        ],
+        "bikes": [{"id": "b1", "name": "Gravel bike"}],
+    }
+    assert ingest_strava._gear_names(athlete) == {
+        "g123": "Brooks Ghost 15",
+        "g456": "Inov-8 TrailFly Ultra G300",
+        "b1": "Gravel bike",
+    }
+    assert ingest_strava._gear_names({}) == {}
+
+
+def test_enrichment_from_summary():
+    from run_map import ingest_strava
+    a = {
+        "gear_id": "g123",
+        "total_elevation_gain": 320.0,
+        "average_heartrate": 142.2,
+        "max_heartrate": 171,
+        "suffer_score": 55,
+    }
+    got = ingest_strava._enrichment_from_summary(a, {"g123": "Brooks Ghost 15"})
+    assert got == {
+        "gear": "Brooks Ghost 15",
+        "elevation_gain_m": 320.0,
+        "avg_hr": 142.2,
+        "max_hr": 171.0,
+        "relative_effort": 55.0,
+    }
+    # Unknown gear id / missing fields -> Nones, never KeyError.
+    got = ingest_strava._enrichment_from_summary({"gear_id": None}, {})
+    assert got == {"gear": None, "elevation_gain_m": None, "avg_hr": None,
+                   "max_hr": None, "relative_effort": None}

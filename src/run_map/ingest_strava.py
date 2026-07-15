@@ -36,6 +36,38 @@ def _activity_type(a: dict) -> str:
     return a.get("sport_type") or a.get("type") or ""
 
 
+def _gear_names(athlete_json: dict) -> dict[str, str]:
+    """gear_id -> display name, from the athlete's shoes + bikes lists.
+    Distinct Strava gear with identical names collapses later by design —
+    the bulk export only carries names, so names are the canonical key."""
+    out: dict[str, str] = {}
+    for item in (athlete_json.get("shoes") or []) + (athlete_json.get("bikes") or []):
+        gid = item.get("id")
+        name = (item.get("name") or "").strip()
+        if gid and name:
+            out[gid] = name
+    return out
+
+
+def _enrichment_from_summary(a: dict, gear_names: dict[str, str]) -> dict:
+    """upsert_activity enrichment kwargs available from a summary activity.
+    description/weather are NOT in the summary payload — they stay None here
+    and COALESCE in the upsert preserves any bulk-imported value."""
+    def _f(key: str) -> float | None:
+        v = a.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+    return {
+        "gear": gear_names.get(a.get("gear_id") or ""),
+        "elevation_gain_m": _f("total_elevation_gain"),
+        "avg_hr": _f("average_heartrate"),
+        "max_hr": _f("max_heartrate"),
+        "relative_effort": _f("suffer_score"),
+    }
+
+
 # ---- credentials / tokens -------------------------------------------------
 
 def load_config() -> dict:
@@ -226,6 +258,18 @@ def sync_with_tokens(
             total = len(activities)
             _report("processing", 0, total, f"Found {total} activities to consider")
 
+            # One /athlete call resolves every gear_id to its display name.
+            # Failure here must not abort the sync — gear just stays NULL.
+            gear_names: dict[str, str] = {}
+            try:
+                ar = _get_with_retry(client, f"{API}/athlete", on_wait=on_wait)
+                ar.raise_for_status()
+                gear_names = _gear_names(ar.json())
+            except DailyRateLimit:
+                raise
+            except Exception:
+                pass
+
             for i, a in enumerate(activities, start=1):
                 raw_type = _activity_type(a)
                 a_type = canonical_type(raw_type)
@@ -264,6 +308,7 @@ def sync_with_tokens(
                         strava_url=f"https://www.strava.com/activities/{a['id']}",
                         source="api",
                         track_wkt=wkt,
+                        **_enrichment_from_summary(a, gear_names),
                     )
                     inserted += 1
                 except (DailyRateLimit, duckdb.FatalException):
