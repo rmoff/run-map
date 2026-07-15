@@ -863,3 +863,73 @@ def test_enrichment_from_summary():
     got = ingest_strava._enrichment_from_summary({"gear_id": None}, {})
     assert got == {"gear": None, "elevation_gain_m": None, "avg_hr": None,
                    "max_hr": None, "relative_effort": None}
+
+
+# ---- gear filter + enriched payloads ----------------------------------------
+
+
+def test_index_json_carries_gear(app_client):
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, gear="Brooks Ghost 15")
+    _seed(conn, id=2)  # no gear
+    acts = {a["id"]: a for a in client.get("/index.json").json()["activities"]}
+    assert acts[1]["gear"] == "Brooks Ghost 15"
+    assert acts[2]["gear"] is None
+
+
+def test_gear_filter_on_index(app_client):
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, gear="Brooks Ghost 15")
+    _seed(conn, id=2, gear="Merrell Moab 3 GTX")
+    _seed(conn, id=3)  # no gear
+
+    ids = lambda r: sorted(a["id"] for a in r.json()["activities"])
+    assert ids(client.get("/index.json?gear=Brooks%20Ghost%2015")) == [1]
+    # Repeatable param ORs together.
+    assert ids(client.get(
+        "/index.json?gear=Brooks%20Ghost%2015&gear=Merrell%20Moab%203%20GTX")) == [1, 2]
+    # Empty value means "no shoe".
+    assert ids(client.get("/index.json?gear=")) == [3]
+    assert ids(client.get("/index.json?gear=&gear=Brooks%20Ghost%2015")) == [1, 3]
+
+
+def test_gear_filter_distinct_cache_entries(app_client):
+    """Two different gear filters must not collide on one cache blob."""
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, gear="A")
+    _seed(conn, id=2, gear="B")
+    a = client.get("/index.json?gear=A").json()["activities"]
+    b = client.get("/index.json?gear=B").json()["activities"]
+    assert [x["id"] for x in a] == [1]
+    assert [x["id"] for x in b] == [2]
+
+
+def test_match_carries_enrichment(app_client):
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, gear="Brooks Ghost 15", elevation_gain_m=320.0,
+          avg_hr=142.0, max_hr=171.0, relative_effort=55.0,
+          description="⛰️ Crow Wells Hill")
+    r = client.get("/match", params={"lat": 53.50, "lon": -1.50, "r": 200})
+    assert r.status_code == 200
+    m = r.json()[0]
+    assert m["gear"] == "Brooks Ghost 15"
+    assert m["elevation_gain_m"] == 320.0
+    assert m["avg_hr"] == 142.0
+    assert m["max_hr"] == 171.0
+    assert m["relative_effort"] == 55.0
+    assert m["description"] == "⛰️ Crow Wells Hill"
+    assert isinstance(m["geometry"], list) and len(m["geometry"]) > 0
+
+
+def test_gear_filter_on_match(app_client):
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, gear="Brooks Ghost 15")
+    _seed(conn, id=2, gear="Merrell Moab 3 GTX")
+    r = client.get("/match", params={"lat": 53.50, "lon": -1.50, "r": 200,
+                                     "gear": "Brooks Ghost 15"})
+    assert [m["id"] for m in r.json()] == [1]

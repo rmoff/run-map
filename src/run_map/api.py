@@ -116,6 +116,7 @@ def _filter_clause(
     type: str | None = None,
     min_km: float | None = None,
     max_km: float | None = None,
+    gear: list[str] | None = None,
     hike_min_km: float | None = None,
 ) -> tuple[list[str], list, dict]:
     # Baseline gate on every map/match query: short hikes are stored (so the
@@ -156,6 +157,19 @@ def _filter_clause(
         where.append("distance_m < ?")
         params.append(max_km * 1000.0)
         sig["max_km"] = max_km
+    if gear:
+        # Repeatable param; "" is the reserved "no shoe" value (gear IS NULL).
+        names = sorted({g for g in gear if g})
+        include_null = any(g == "" for g in gear)
+        clauses = []
+        if names:
+            clauses.append("gear IN (" + ", ".join("?" * len(names)) + ")")
+            params.extend(names)
+        if include_null:
+            clauses.append("gear IS NULL")
+        if clauses:
+            where.append("(" + " OR ".join(clauses) + ")")
+            sig["gear"] = names + ([""] if include_null else [])
     return where, params, sig
 
 
@@ -259,8 +273,14 @@ def _match_rows(rows) -> list[dict]:
             "name": r[2],
             "distance_m": r[3],
             "strava_url": r[4],
-            "activity_type": r[5] if len(r) > 5 else None,
-            "geometry": _geometry_to_latlngs(r[6]) if len(r) > 6 else [],
+            "activity_type": r[5],
+            "gear": r[6],
+            "elevation_gain_m": r[7],
+            "avg_hr": r[8],
+            "max_hr": r[9],
+            "relative_effort": r[10],
+            "description": r[11],
+            "geometry": _geometry_to_latlngs(r[12]),
         })
     return out
 
@@ -316,6 +336,7 @@ def match_point(
     date_start: str | None = None, date_end: str | None = None,
     type: str | None = None,
     min_km: float | None = None, max_km: float | None = None,
+    gear: list[str] | None = Query(None),
     hike_min_km: float | None = None,
 ) -> list[dict]:
     """Runs whose track came within `r` metres of (lat, lon). Each match
@@ -329,11 +350,14 @@ def match_point(
     radius_deg = r / 111_320.0
     where = ["ST_DWithin(ST_Scale(track, ?, 1.0), ST_Scale(ST_Point(?, ?), ?, 1.0), ?)"]
     params: list = [cos_lat, lon, lat, cos_lat, radius_deg]
-    fwhere, fparams, _ = _filter_clause(date_start, date_end, type, min_km, max_km, hike_min_km)
+    fwhere, fparams, _ = _filter_clause(date_start=date_start, date_end=date_end,
+                                        type=type, min_km=min_km, max_km=max_km,
+                                        gear=gear, hike_min_km=hike_min_km)
     where.extend(fwhere)
     params.extend(fparams)
     sql = (
         "SELECT id, start_time, name, distance_m, strava_url, type, "
+        "       gear, elevation_gain_m, avg_hr, max_hr, relative_effort, description, "
         "       ST_AsGeoJSON(ST_Simplify(track, ?)) "
         "FROM activities WHERE " + " AND ".join(where) + " ORDER BY start_time DESC"
     )
@@ -349,15 +373,19 @@ def match_polygon(
     type: str | None = Form(None),
     min_km: float | None = Form(None),
     max_km: float | None = Form(None),
+    gear: list[str] | None = Form(None),
     hike_min_km: float | None = Form(None),
 ) -> list[dict]:
     where = ["ST_Intersects(track, ST_GeomFromText(?))"]
     params: list = [wkt]
-    fwhere, fparams, _ = _filter_clause(date_start, date_end, type, min_km, max_km, hike_min_km)
+    fwhere, fparams, _ = _filter_clause(date_start=date_start, date_end=date_end,
+                                        type=type, min_km=min_km, max_km=max_km,
+                                        gear=gear, hike_min_km=hike_min_km)
     where.extend(fwhere)
     params.extend(fparams)
     sql = (
         "SELECT id, start_time, name, distance_m, strava_url, type, "
+        "       gear, elevation_gain_m, avg_hr, max_hr, relative_effort, description, "
         "       ST_AsGeoJSON(ST_Simplify(track, ?)) "
         "FROM activities WHERE " + " AND ".join(where) + " ORDER BY start_time DESC"
     )
@@ -414,11 +442,11 @@ def _filtered_rows(cols: str, **filters) -> list:
 
 def _build_index(**filters) -> bytes:
     rows = _filtered_rows(
-        "id, start_time, type, distance_m, ST_AsGeoJSON(track)", **filters
+        "id, start_time, type, distance_m, gear, ST_AsGeoJSON(track)", **filters
     )
     entries = []
     for r in rows:
-        coords = _coords_from_geojson(r[4]) if r[4] else []
+        coords = _coords_from_geojson(r[5]) if r[5] else []
         if not coords:
             continue
         step = max(1, len(coords) // _INDEX_SAMPLES)
@@ -430,6 +458,7 @@ def _build_index(**filters) -> bytes:
             "start_time": r[1].isoformat() if r[1] else None,
             "type": r[2],
             "distance_m": r[3],
+            "gear": r[4],
             "samples": samples,
             "bbox": [min(lons), min(lats), max(lons), max(lats)],
         })
@@ -517,14 +546,17 @@ def activity_index(
     date_start: str | None = None, date_end: str | None = None,
     type: str | None = None,
     min_km: float | None = None, max_km: float | None = None,
+    gear: list[str] | None = Query(None),
     hike_min_km: float | None = None,
 ) -> Response:
-    _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km, hike_min_km)
+    _, _, sig = _filter_clause(date_start=date_start, date_end=date_end, type=type,
+                                min_km=min_km, max_km=max_km, gear=gear,
+                                hike_min_km=hike_min_km)
     return _serve_cached(
-        _cache_sig("index", sig),
+        _cache_sig("index2", sig),
         lambda: _build_index(date_start=date_start, date_end=date_end,
                              type=type, min_km=min_km, max_km=max_km,
-                             hike_min_km=hike_min_km),
+                             gear=gear, hike_min_km=hike_min_km),
     )
 
 
@@ -533,18 +565,21 @@ def aggregate_geojson(
     date_start: str | None = None, date_end: str | None = None,
     type: str | None = None,
     min_km: float | None = None, max_km: float | None = None,
+    gear: list[str] | None = Query(None),
     hike_min_km: float | None = None,
     lod: str = _AGG_LOD_DEFAULT,
 ) -> Response:
     if lod not in _AGG_LODS:
         raise HTTPException(400, f"Unknown lod '{lod}'. Expected one of: {sorted(_AGG_LODS)}")
-    _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km, hike_min_km)
+    _, _, sig = _filter_clause(date_start=date_start, date_end=date_end, type=type,
+                                min_km=min_km, max_km=max_km, gear=gear,
+                                hike_min_km=hike_min_km)
     sig = {**sig, "lod": lod}
     return _serve_cached(
         _cache_sig("aggregate2", sig),
         lambda: _build_aggregate(lod=lod, date_start=date_start, date_end=date_end,
                                   type=type, min_km=min_km, max_km=max_km,
-                                  hike_min_km=hike_min_km),
+                                  gear=gear, hike_min_km=hike_min_km),
     )
 
 
@@ -553,14 +588,17 @@ def heatmap_json(
     date_start: str | None = None, date_end: str | None = None,
     type: str | None = None,
     min_km: float | None = None, max_km: float | None = None,
+    gear: list[str] | None = Query(None),
     hike_min_km: float | None = None,
 ) -> Response:
-    _, _, sig = _filter_clause(date_start, date_end, type, min_km, max_km, hike_min_km)
+    _, _, sig = _filter_clause(date_start=date_start, date_end=date_end, type=type,
+                                min_km=min_km, max_km=max_km, gear=gear,
+                                hike_min_km=hike_min_km)
     return _serve_cached(
         _cache_sig("heatmap", sig),
         lambda: _build_heatmap(date_start=date_start, date_end=date_end,
                                type=type, min_km=min_km, max_km=max_km,
-                               hike_min_km=hike_min_km),
+                               gear=gear, hike_min_km=hike_min_km),
     )
 
 
