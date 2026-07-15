@@ -42,7 +42,8 @@ def app_client(tmp_path: Path, monkeypatch):
     yield TestClient(api_mod.app), db_mod, api_mod
 
 
-def _seed(conn, *, id: int, type_: str = "Run", coords=None, start="2025-01-01T08:00:00"):
+def _seed(conn, *, id: int, type_: str = "Run", coords=None,
+          start="2025-01-01T08:00:00", **enrich):
     if coords is None:
         # A zig-zag — straight-line simplification would collapse a perfectly
         # linear track to just endpoints, which hides the dedupe behaviour we
@@ -62,6 +63,7 @@ def _seed(conn, *, id: int, type_: str = "Run", coords=None, start="2025-01-01T0
         strava_url=f"https://www.strava.com/activities/{id}",
         source="test",
         track_wkt=f"LINESTRING({wkt_pts})",
+        **enrich,
     )
 
 
@@ -704,3 +706,51 @@ def test_invalidate_caches_picks_up_new_tracks(app_client):
     # /index.json invalidates alongside.
     idx = client.get("/index.json").json()
     assert {a["id"] for a in idx["activities"]} == {1, 2}
+
+
+# ---- Enrichment columns (gear / elevation / HR / weather) ------------------
+
+
+def test_schema_migrates_existing_db(app_client, tmp_path):
+    """A DB created before the enrichment columns gains them on connect."""
+    _, db_mod, _ = app_client
+    old = tmp_path / "old.duckdb"
+    import duckdb as _duck
+    c = _duck.connect(str(old))
+    c.execute("""
+        CREATE TABLE activities (
+            id BIGINT PRIMARY KEY, start_time TIMESTAMP, name VARCHAR,
+            distance_m DOUBLE, moving_time_s INTEGER, type VARCHAR,
+            strava_url VARCHAR, source VARCHAR)
+    """)
+    c.close()
+    conn = db_mod.connect(old)
+    cols = {r[0] for r in conn.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'activities'").fetchall()}
+    conn.close()
+    assert {"gear", "elevation_gain_m", "avg_hr", "max_hr",
+            "relative_effort", "description", "weather"} <= cols
+
+
+def test_upsert_enrichment_roundtrip_and_null_preservation(app_client):
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, gear="Brooks Ghost 15", elevation_gain_m=320.0,
+          avg_hr=142.0, max_hr=171.0, relative_effort=55.0,
+          description="⛰️ Crow Wells Hill", weather_json='{"temperature_c": 5.0}')
+    row = conn.execute(
+        "SELECT gear, elevation_gain_m, avg_hr, max_hr, relative_effort, "
+        "description, weather FROM activities WHERE id = 1").fetchone()
+    assert row == ("Brooks Ghost 15", 320.0, 142.0, 171.0, 55.0,
+                   "⛰️ Crow Wells Hill", '{"temperature_c": 5.0}')
+
+    # Re-upsert the same id with no enrichment (as the API sync would for
+    # description/weather) — existing values must survive.
+    _seed(conn, id=1)
+    row = conn.execute("SELECT gear, description, weather FROM activities WHERE id = 1").fetchone()
+    assert row == ("Brooks Ghost 15", "⛰️ Crow Wells Hill", '{"temperature_c": 5.0}')
+
+    # A non-null value still wins over the stored one.
+    _seed(conn, id=1, gear="Brooks Ghost 16")
+    assert conn.execute("SELECT gear FROM activities WHERE id = 1").fetchone()[0] == "Brooks Ghost 16"
