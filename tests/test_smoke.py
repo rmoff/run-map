@@ -822,7 +822,9 @@ def test_show_as_matches_renders_filtered_set(page: Page, app_url):
 
     with page.expect_response(
         lambda r: "/match/polygon" in r.url and r.status == 200,
-        timeout=10_000,
+        # The enriched /match* payload (gear, HR, description, …) gzips on
+        # the fly at ~9 s for a busy viewport — 10 s was borderline flaky.
+        timeout=30_000,
     ):
         page.click("#filter-show-matches")
 
@@ -857,7 +859,8 @@ def test_pill_toggle_refreshes_filter_matches(page: Page, app_url):
     )
     with page.expect_response(
         lambda r: "/match/polygon" in r.url and r.status == 200,
-        timeout=10_000,
+        # Enriched /match* payload gzips at ~9 s for a busy viewport.
+        timeout=30_000,
     ):
         page.click("#filter-show-matches")
     page.wait_for_function("() => window.__rm.matchCount() > 0", timeout=10_000)
@@ -865,7 +868,7 @@ def test_pill_toggle_refreshes_filter_matches(page: Page, app_url):
     # Toggle Road off — expect a fresh /match/polygon with type=TrailRun,Hike.
     with page.expect_response(
         lambda r: "/match/polygon" in r.url and r.status == 200,
-        timeout=15_000,
+        timeout=30_000,
     ) as resp_info:
         page.locator('#type-pills [data-type="Run"]').click()
     # Matches still present (refreshed, not cleared).
@@ -1137,3 +1140,41 @@ def test_mobile_touch_targets(page: Page, app_url):
     )
     for s in sizes:
         assert s["h"] >= 40, f"#{s['id']} touch target too short: {s}"
+
+
+# ---------- Shoe filter ------------------------------------------------------
+
+
+def _open_filter_menu(page: Page):
+    # Hover, don't click: the funnel button opens its popover on pointerenter,
+    # so a click's implicit hover opens it and the click then toggles it shut.
+    page.hover("#filter-control-btn")
+    page.wait_for_selector("#filter-menu:not(.hidden)", timeout=5_000)
+
+
+def test_shoe_filter_section_lists_shoes(page: Page, app_url):
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+    _open_filter_menu(page)
+    # The dev DB is backfilled from the bulk export, so real shoes exist.
+    page.wait_for_selector("#filter-gear-list label", timeout=5_000)
+    labels = page.locator("#filter-gear-list label")
+    assert labels.count() >= 2
+
+
+def test_shoe_filter_applies_and_chips(page: Page, app_url):
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+    _open_filter_menu(page)
+    page.wait_for_selector("#filter-gear-list input[type=checkbox]", timeout=5_000)
+    first = page.locator("#filter-gear-list input[type=checkbox]").first
+    shoe = first.get_attribute("data-gear")
+    first.check()
+    page.click("#filter-apply")
+    # Chip appears and the gear filter is live.
+    page.wait_for_selector("#filter-chips .chip", timeout=5_000)
+    assert shoe in page.locator("#filter-chips").inner_text()
+    assert page.evaluate("() => window.__rm.gearFilter()") == [shoe]
+    # Removing the chip clears it.
+    page.click("#filter-chips .chip .x")
+    page.wait_for_function("() => window.__rm.gearFilter() === null", timeout=5_000)
