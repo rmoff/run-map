@@ -754,3 +754,67 @@ def test_upsert_enrichment_roundtrip_and_null_preservation(app_client):
     # A non-null value still wins over the stored one.
     _seed(conn, id=1, gear="Brooks Ghost 16")
     assert conn.execute("SELECT gear FROM activities WHERE id = 1").fetchone()[0] == "Brooks Ghost 16"
+
+
+# ---- Bulk-export enrichment parsing ----------------------------------------
+
+
+def _bulk_df(csv_text: str):
+    import io
+    import pandas as pd  # noqa: F401  (ingest_bulk re-exports nothing; parse via module)
+    from run_map import ingest_bulk
+    import tempfile, pathlib
+    with tempfile.TemporaryDirectory() as d:
+        p = pathlib.Path(d) / "activities.csv"
+        p.write_text(csv_text)
+        return ingest_bulk._parse_csv(pathlib.Path(d))
+
+
+def test_parse_csv_normalises_enrichment_columns():
+    # Duplicate 'Max Heart Rate' / 'Relative Effort' headers mimic the real
+    # export; the first occurrence must win.
+    df = _bulk_df(
+        "Activity ID,Activity Date,Activity Name,Activity Type,"
+        "Max Heart Rate,Relative Effort,Activity Gear,Activity Description,"
+        "Filename,Distance,Moving Time,Elevation Gain,Average Heart Rate,"
+        "Max Heart Rate,Relative Effort\n"
+        '1,"Jan 1, 2025, 8:00:00 AM",Morning Run,Run,'
+        "171.0,55.0,Brooks Ghost 15,Nice run,"
+        "activities/1.gpx,5.0,1800,320.0,142.0,"
+        "171.0,55.0\n"
+    )
+    row = df.iloc[0]
+    assert row["gear"] == "Brooks Ghost 15"
+    assert row["description"] == "Nice run"
+    assert float(row["elevation_gain_m"]) == 320.0
+    assert float(row["avg_hr"]) == 142.0
+    assert float(row["max_hr"]) == 171.0
+    assert float(row["relative_effort"]) == 55.0
+
+
+def test_weather_json_builds_from_row_and_skips_empty():
+    import pandas as pd
+    import json as _json
+    from run_map import ingest_bulk
+    row = pd.Series({
+        "Weather Temperature": 5.0,
+        "Humidity": 0.84,
+        "Wind Speed": 3.1,
+        "Weather Condition": 3.0,
+        "UV Index": float("nan"),   # empty cell -> omitted
+    })
+    w = _json.loads(ingest_bulk._weather_json(row))
+    assert w == {"temperature_c": 5.0, "humidity": 0.84,
+                 "wind_speed": 3.1, "condition": 3.0}
+    # All-empty weather -> None, not '{}'
+    assert ingest_bulk._weather_json(pd.Series({"Humidity": float("nan")})) is None
+
+
+def test_opt_helpers_handle_nan():
+    from run_map import ingest_bulk
+    assert ingest_bulk._opt_float(float("nan")) is None
+    assert ingest_bulk._opt_float("320.0") == 320.0
+    assert ingest_bulk._opt_float(None) is None
+    assert ingest_bulk._opt_str(float("nan")) is None
+    assert ingest_bulk._opt_str("  Brooks  ") == "Brooks"
+    assert ingest_bulk._opt_str("") is None
