@@ -868,6 +868,7 @@ def test_pill_toggle_refreshes_filter_matches(page: Page, app_url):
     # Toggle Road off — expect a fresh /match/polygon with type=TrailRun,Hike.
     with page.expect_response(
         lambda r: "/match/polygon" in r.url and r.status == 200,
+        # Enriched /match* payload gzips at ~9 s for a busy viewport.
         timeout=30_000,
     ) as resp_info:
         page.locator('#type-pills [data-type="Run"]').click()

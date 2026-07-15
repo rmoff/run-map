@@ -470,7 +470,7 @@ function loadSavedState() {
     hikeMinKm: p.get('hmin') != null ? Number(p.get('hmin')) : null,
     filterMinKm: p.get('fmin') ? Number(p.get('fmin')) : null,
     filterMaxKm: p.get('fmax') ? Number(p.get('fmax')) : null,
-    filterGear: p.get('fgear')
+    filterGear: p.get('fgear') != null
       ? p.get('fgear').split('|').map(decodeURIComponent)
       : null,
     baseLayer: p.get('base') || 'Topo (OpenTopoMap)',
@@ -2047,7 +2047,7 @@ function renderFilterChips() {
     chips.push({ key: `gear:${g}`, label: `👟 ${g || '(no shoe)'}` });
   }
   host.innerHTML = chips.map(c =>
-    `<span class="chip" data-key="${c.key}">${escapeHTML(c.label)}<span class="x" title="Remove">×</span></span>`
+    `<span class="chip" data-key="${escapeHTML(c.key)}">${escapeHTML(c.label)}<span class="x" title="Remove">×</span></span>`
   ).join('');
   for (const el of host.querySelectorAll('.chip .x')) {
     el.addEventListener('click', () => {
