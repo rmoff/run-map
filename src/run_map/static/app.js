@@ -27,6 +27,8 @@ window.__rm = {
   distSnapValues: () => _distSnapValues.slice(),
   get indexById() { return indexById; },
   gearFilter: () => (activeFilters.gear ? activeFilters.gear.slice() : null),
+  shoeSheetOpen: () => shoeSheetOpen(),
+  shoeSeriesCount: () => document.querySelectorAll('#shoe-chart path.shoe-line').length,
 };
 
 const _osmAttr = '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>';
@@ -414,6 +416,7 @@ function _currentHash() {
   if (activeFilters.min_km != null) p.set('fmin', activeFilters.min_km);
   if (activeFilters.max_km != null) p.set('fmax', activeFilters.max_km);
   if (activeFilters.gear) p.set('fgear', activeFilters.gear.map(encodeURIComponent).join('|'));
+  if (shoeSheetOpen()) p.set('shoes', '1');
   // Settings persistence — only non-default values go on the wire to keep
   // shared URLs short.
   const lock = document.getElementById('lock-to-track');
@@ -473,6 +476,7 @@ function loadSavedState() {
     filterGear: p.get('fgear') != null
       ? p.get('fgear').split('|').map(decodeURIComponent)
       : null,
+    shoeSheet: p.get('shoes') === '1',
     baseLayer: p.get('base') || 'Topo (OpenTopoMap)',
     baseOpacity: p.get('op') ? parseInt(p.get('op'), 10) : 50,
     searchRadius: p.get('sr') ? parseInt(p.get('sr'), 10) : 0,
@@ -2561,6 +2565,7 @@ for (const pill of document.querySelectorAll('#type-pills .type-pill')) {
 async function applyFilters() {
   pushHistoryCheckpoint();
   renderFilterChips();
+  if (shoeSheetOpen()) renderShoeChart();
   _syncTypePills();
   // Filters change the data underlying every layer + match. Reload everything.
   invalidateHeatmapData();
@@ -2710,6 +2715,236 @@ async function maybeAutoOpenSettings() {
   if (count === 0) openSettings();
 }
 
+// ---- Shoe lifetimes bottom sheet -----------------------------------------
+//
+// Cumulative km per shoe over calendar time, computed client-side from the
+// unfiltered boot index. Hue encodes *brand* (a fixed, validated categorical
+// palette — never cycle hues per shoe); per-shoe identity comes from the
+// list (swatch + name + km) and the hover tooltip. The chart respects the
+// active filters EXCEPT the shoe filter itself: "the chart shows what the
+// map shows", and clicking a shoe here is how you drive that filter.
+
+const SHOE_BRAND_COLORS = {
+  brooks: '#2a78d6',
+  merrell: '#1baf7a',
+  'inov-8': '#eda100',
+  nike: '#008300',
+  saucony: '#4a3aa7',
+  scarpa: '#e34948',
+  skechers: '#e87ba4',
+};
+const SHOE_OTHER_COLOR = '#898781';  // any brand beyond the fixed seven
+
+function shoeColor(name) {
+  const brand = name.split(/\s+/)[0].toLowerCase();
+  return SHOE_BRAND_COLORS[brand] || SHOE_OTHER_COLOR;
+}
+
+function buildShoeSeries() {
+  const f = {
+    date_start: activeFilters.date_start,
+    date_end: activeFilters.date_end,
+    type: activeFilters.type,
+    gear: null,  // never narrowed by its own facet
+  };
+  const lo = activeFilters.min_km, hi = activeFilters.max_km;
+  const byShoe = new Map();
+  for (const a of _allActivities) {
+    if (!a.gear || !a.start_time) continue;
+    if (!_activityMatchesOtherFilters(a, f)) continue;
+    if (lo != null && a.distance_m < lo * 1000) continue;
+    if (hi != null && a.distance_m >= hi * 1000) continue;
+    if (!byShoe.has(a.gear)) byShoe.set(a.gear, []);
+    byShoe.get(a.gear).push(a);
+  }
+  const series = [];
+  for (const [name, list] of byShoe) {
+    list.sort((x, y) => (x.start_time < y.start_time ? -1 : 1));
+    let km = 0;
+    const pts = list.map(a => {
+      km += (a.distance_m || 0) / 1000;
+      return { t: Date.parse(a.start_time), km };
+    });
+    series.push({
+      name, pts, total: km, color: shoeColor(name),
+      first: list[0].start_time.slice(0, 10),
+      last: list[list.length - 1].start_time.slice(0, 10),
+    });
+  }
+  series.sort((a, b) => b.total - a.total);
+  return series;
+}
+
+const _svgNS = 'http://www.w3.org/2000/svg';
+
+function _shoeFocus(name) {
+  const svg = document.getElementById('shoe-chart');
+  svg.classList.toggle('focused', !!name);
+  for (const p of svg.querySelectorAll('path.shoe-line')) {
+    p.classList.toggle('hot', p.dataset.shoe === name);
+  }
+  for (const r of document.querySelectorAll('#shoe-list .shoe-row')) {
+    r.classList.toggle('hot', r.dataset.shoe === name);
+  }
+}
+
+function _applyShoeAsFilter(name) {
+  activeFilters.gear = [name];
+  applyFilters();
+}
+
+function renderShoeChart() {
+  const sheet = document.getElementById('shoe-sheet');
+  if (sheet.classList.contains('hidden')) return;
+  const svg = document.getElementById('shoe-chart');
+  const list = document.getElementById('shoe-list');
+  const tip = document.getElementById('shoe-tooltip');
+  const sub = document.getElementById('shoe-sheet-sub');
+  svg.innerHTML = '';
+  tip.classList.add('hidden');
+
+  const series = buildShoeSeries();
+  sub.textContent = series.length
+    ? `${series.length} shoes · cumulative km · click a shoe to filter the map`
+    : '';
+  if (!series.length) {
+    list.innerHTML = '';
+    svg.innerHTML = '';
+    const note = document.createElement('div');
+    note.className = 'empty-note';
+    note.textContent = _allActivities.some(a => a.gear)
+      ? 'No shoes match the current filters.'
+      : 'No shoe data yet — re-import your Strava export ZIP to backfill shoes.';
+    note.id = 'shoe-empty-note';
+    document.getElementById('shoe-chart-wrap').replaceChildren(svg, tip, note);
+    return;
+  }
+  document.getElementById('shoe-empty-note')?.remove();
+
+  // Scales. The wrap box is the coordinate system (SVG fills it).
+  const box = svg.parentElement.getBoundingClientRect();
+  const W = Math.max(box.width, 320), H = Math.max(box.height, 160);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const m = { top: 10, right: 16, bottom: 22, left: 44 };
+  let t0 = Infinity, t1 = -Infinity, kmMax = 0;
+  for (const s of series) {
+    t0 = Math.min(t0, s.pts[0].t);
+    t1 = Math.max(t1, s.pts[s.pts.length - 1].t);
+    kmMax = Math.max(kmMax, s.total);
+  }
+  if (t1 <= t0) t1 = t0 + 86400e3;
+  const x = t => m.left + ((t - t0) / (t1 - t0)) * (W - m.left - m.right);
+  const y = km => H - m.bottom - (km / kmMax) * (H - m.top - m.bottom);
+
+  // Recessive grid + axis labels (y: ~4 ticks, x: year boundaries).
+  const yStep = kmMax > 1200 ? 500 : kmMax > 600 ? 250 : kmMax > 240 ? 100 : 50;
+  for (let v = yStep; v <= kmMax; v += yStep) {
+    const ln = document.createElementNS(_svgNS, 'line');
+    ln.setAttribute('class', 'grid');
+    ln.setAttribute('x1', m.left); ln.setAttribute('x2', W - m.right);
+    ln.setAttribute('y1', y(v)); ln.setAttribute('y2', y(v));
+    svg.appendChild(ln);
+    const tx = document.createElementNS(_svgNS, 'text');
+    tx.setAttribute('x', m.left - 6); tx.setAttribute('y', y(v) + 4);
+    tx.setAttribute('text-anchor', 'end');
+    tx.textContent = String(v);
+    svg.appendChild(tx);
+  }
+  const y0 = new Date(t0).getFullYear(), y1 = new Date(t1).getFullYear();
+  const yearEvery = Math.max(1, Math.ceil((y1 - y0) / 8));
+  for (let yr = y0 + 1; yr <= y1; yr += yearEvery) {
+    const t = Date.UTC(yr, 0, 1);
+    if (t < t0 || t > t1) continue;
+    const tx = document.createElementNS(_svgNS, 'text');
+    tx.setAttribute('x', x(t)); tx.setAttribute('y', H - 6);
+    tx.setAttribute('text-anchor', 'middle');
+    tx.textContent = String(yr);
+    svg.appendChild(tx);
+  }
+
+  // One visible path per shoe + a fat invisible twin as the hover/click
+  // target (2px strokes are miserable hit areas).
+  for (const s of series) {
+    const d = s.pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)} ${y(p.km).toFixed(1)}`).join('');
+    const path = document.createElementNS(_svgNS, 'path');
+    path.setAttribute('class', 'shoe-line');
+    path.setAttribute('d', d);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', s.color);
+    path.setAttribute('stroke-width', '2');
+    path.dataset.shoe = s.name;
+    const hit = document.createElementNS(_svgNS, 'path');
+    hit.setAttribute('d', d);
+    hit.setAttribute('fill', 'none');
+    hit.setAttribute('stroke', 'rgba(0,0,0,0)');
+    hit.setAttribute('stroke-width', '12');
+    hit.dataset.shoe = s.name;
+    hit.addEventListener('mouseenter', () => {
+      _shoeFocus(s.name);
+      tip.innerHTML = `<div class="tt-name">${escapeHTML(s.name)}</div>` +
+        `<div class="tt-meta">${Math.round(s.total)} km · ${s.pts.length} activities<br>${s.first} → ${s.last}</div>`;
+      tip.classList.remove('hidden');
+    });
+    hit.addEventListener('mousemove', e => {
+      const wrap = svg.parentElement.getBoundingClientRect();
+      tip.style.left = `${Math.min(e.clientX - wrap.left + 12, wrap.width - 250)}px`;
+      tip.style.top = `${e.clientY - wrap.top + 12}px`;
+    });
+    hit.addEventListener('mouseleave', () => { _shoeFocus(null); tip.classList.add('hidden'); });
+    hit.addEventListener('click', () => _applyShoeAsFilter(s.name));
+    svg.appendChild(path);
+    svg.appendChild(hit);
+  }
+
+  // The list is the legend AND the table view: swatch carries the brand hue,
+  // text carries identity — identity is never color-alone.
+  list.innerHTML = series.map(s => `
+    <button type="button" class="shoe-row" data-shoe="${escapeHTML(s.name)}" title="${s.first} → ${s.last}">
+      <span class="swatch" style="background:${s.color}"></span>
+      <span class="sname">${escapeHTML(s.name)}</span>
+      <span class="skm">${Math.round(s.total)} km</span>
+    </button>`).join('');
+  for (const row of list.querySelectorAll('.shoe-row')) {
+    row.addEventListener('mouseenter', () => _shoeFocus(row.dataset.shoe));
+    row.addEventListener('mouseleave', () => _shoeFocus(null));
+    row.addEventListener('click', () => _applyShoeAsFilter(row.dataset.shoe));
+  }
+}
+
+function shoeSheetOpen() {
+  return !document.getElementById('shoe-sheet').classList.contains('hidden');
+}
+
+function toggleShoeSheet(force) {
+  const sheet = document.getElementById('shoe-sheet');
+  const open = force != null ? force : sheet.classList.contains('hidden');
+  sheet.classList.toggle('hidden', !open);
+  sheet.setAttribute('aria-hidden', String(!open));
+  if (open) renderShoeChart();
+  saveState();
+}
+
+document.getElementById('shoe-sheet-close').addEventListener('click', () => toggleShoeSheet(false));
+window.addEventListener('resize', () => { if (shoeSheetOpen()) renderShoeChart(); });
+
+// 👟 toolbar control (same pattern as ResetControl).
+const ShoeControl = L.Control.extend({
+  options: { position: 'topleft' },
+  onAdd() {
+    const div = L.DomUtil.create('div', 'leaflet-bar leaflet-control');
+    const a = L.DomUtil.create('a', '', div);
+    a.href = '#'; a.title = 'Shoes'; a.textContent = '👟'; a.id = 'shoe-control-btn';
+    a.style.fontSize = '15px'; a.style.lineHeight = '26px'; a.style.textAlign = 'center';
+    L.DomEvent.on(a, 'click', e => {
+      L.DomEvent.preventDefault(e);
+      L.DomEvent.stopPropagation(e);
+      toggleShoeSheet();
+    });
+    return div;
+  },
+});
+map.addControl(new ShoeControl());
+
 // ---- Init ----------------------------------------------------------------
 
 async function applyURLState({ animate } = { animate: false }) {
@@ -2794,6 +3029,7 @@ async function applyURLState({ animate } = { animate: false }) {
   // Heatmap toggle reflects saved hash before applyZoomMode decides to add it.
   const heat = document.getElementById('heatmap-toggle');
   if (heat) heat.checked = !!saved?.heatmap;
+  toggleShoeSheet(!!saved?.shoeSheet);
 
   if (filterChanged || indexById.size === 0) await loadData();
   if (haveSavedView) {

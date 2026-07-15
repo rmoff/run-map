@@ -1179,3 +1179,38 @@ def test_shoe_filter_applies_and_chips(page: Page, app_url):
     # Removing the chip clears it.
     page.click("#filter-chips .chip .x")
     page.wait_for_function("() => window.__rm.gearFilter() === null", timeout=5_000)
+
+
+# ---------- Shoe lifetimes bottom sheet -------------------------------------
+
+
+def test_shoe_sheet_opens_and_charts(page: Page, app_url):
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+    _let_popovers_close(page)
+    page.click("#shoe-control-btn")
+    page.wait_for_selector("#shoe-sheet:not(.hidden)", timeout=5_000)
+    assert page.evaluate("() => window.__rm.shoeSheetOpen()")
+    # Backfilled dev DB -> real shoe series with paths + list rows.
+    page.wait_for_function("() => window.__rm.shoeSeriesCount() > 0", timeout=5_000)
+    assert page.locator("#shoe-list .shoe-row").count() > 0
+    page.click("#shoe-sheet-close")
+    # Default wait_for_selector state is "visible", which can never match a
+    # selector that requires the .hidden (display:none) class — wait for the
+    # element to be attached with that class instead.
+    page.wait_for_selector("#shoe-sheet.hidden", state="attached", timeout=5_000)
+
+
+def test_shoe_sheet_click_applies_gear_filter(page: Page, app_url):
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _seed_map(page, app_url)
+    _let_popovers_close(page)
+    page.click("#shoe-control-btn")
+    page.wait_for_function("() => window.__rm.shoeSeriesCount() > 0", timeout=5_000)
+    row = page.locator("#shoe-list .shoe-row").first
+    shoe = row.get_attribute("data-shoe")
+    row.click()
+    page.wait_for_function(
+        "() => (window.__rm.gearFilter() || []).length === 1", timeout=10_000)
+    assert page.evaluate("() => window.__rm.gearFilter()") == [shoe]
+    assert shoe in page.locator("#filter-chips").inner_text()
