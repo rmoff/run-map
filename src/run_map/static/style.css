@@ -352,7 +352,7 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
    button). Vertical stack so they don't crowd the chip bar. */
 #type-pills {
   position: absolute;
-  top: 300px;          /* below ⟲ + 🗺 + funnel + draw toolbar */
+  top: 334px;          /* below ⟲ + 🗺 + funnel + draw toolbar + 👟 */
   left: 10px;
   z-index: 900;
   display: flex;
@@ -862,4 +862,107 @@ summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: .9rem; }
   }
   /* Push the rail down so it doesn't peek out from behind the sheet. */
   body.filter-menu-open #right-rail { display: none; }
+}
+
+/* Shoes facet in the filter popover */
+.gear-list {
+  max-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gear-list label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.gear-list label:hover { background: rgba(0, 0, 0, 0.05); }
+.gear-list .gear-count { margin-left: auto; color: #898781; font-size: 11px; }
+
+/* Shoe lifetimes bottom sheet */
+#shoe-sheet {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  height: 42vh;
+  min-height: 260px;
+  background: #fff;
+  border-top: 1px solid #d5d4cd;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.12);
+  z-index: 950;            /* above map panes; below the 1100 popovers + drawer */
+  display: flex;
+  flex-direction: column;
+}
+#shoe-sheet.hidden { display: none; }
+#shoe-sheet header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px 4px;
+}
+#shoe-sheet header h2 { margin: 0; font-size: 15px; }
+#shoe-sheet-sub { color: #898781; font-size: 12px; }
+#shoe-sheet-close { margin-left: auto; }
+#shoe-sheet-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  padding: 0 8px 8px;
+  gap: 8px;
+}
+#shoe-chart-wrap { flex: 1; position: relative; min-width: 0; }
+#shoe-chart { width: 100%; height: 100%; display: block; }
+#shoe-chart path.shoe-line { transition: opacity 0.12s; cursor: pointer; }
+#shoe-chart.focused path.shoe-line:not(.hot) { opacity: 0.25; }
+#shoe-chart text { font: 11px system-ui, sans-serif; fill: #898781; }
+#shoe-chart line.grid { stroke: #e1e0d9; stroke-width: 1; }
+#shoe-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: #fff;
+  border: 1px solid #d5d4cd;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  padding: 5px 8px;
+  font-size: 12px;
+  max-width: 240px;
+  z-index: 2;
+}
+#shoe-tooltip .tt-name { font-weight: 600; }
+#shoe-tooltip .tt-meta { color: #52514e; }
+#shoe-list {
+  width: 250px;
+  overflow-y: auto;
+  border-left: 1px solid #eceae4;
+  padding-left: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.shoe-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  background: none;
+  color: #222;         /* the global button rule paints text white */
+  margin: 0;           /* ...and adds 4px vertical margins */
+  font: 12px system-ui, sans-serif;
+  text-align: left;
+  padding: 3px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.shoe-row:hover, .shoe-row.hot { background: rgba(0, 0, 0, 0.05); }
+.shoe-row .swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.shoe-row .sname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shoe-row .skm { margin-left: auto; color: #898781; font-variant-numeric: tabular-nums; flex: none; white-space: nowrap; }
+#shoe-sheet .empty-note { color: #898781; font-size: 13px; padding: 16px; }
+@media (max-width: 700px) {
+  #shoe-list { display: none; }
+  #shoe-sheet { height: 45vh; }
 }

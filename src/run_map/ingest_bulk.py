@@ -7,6 +7,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +18,67 @@ import pandas as pd
 from . import db
 from .activity_types import IMPORT_TYPES, canonical_type
 from .parsers import parse_track_file
+
+
+# Scalar enrichment columns: export header (lowercased) -> our column name.
+_ENRICH_RENAMES = {
+    "activity gear": "gear",
+    "elevation gain": "elevation_gain_m",
+    "average heart rate": "avg_hr",
+    "max heart rate": "max_hr",
+    "relative effort": "relative_effort",
+    "activity description": "description",
+}
+
+# Weather block: export header -> key inside the `weather` JSON column. All
+# values are numeric; condition / precip type are Strava's numeric codes,
+# stored raw. Kept as one JSON blob — speculative data, no UI yet.
+_WEATHER_COLS = {
+    "Weather Observation Time": "observation_time",
+    "Weather Condition": "condition",
+    "Weather Temperature": "temperature_c",
+    "Apparent Temperature": "apparent_temperature_c",
+    "Dewpoint": "dewpoint_c",
+    "Humidity": "humidity",
+    "Weather Pressure": "pressure_hpa",
+    "Wind Speed": "wind_speed",
+    "Wind Gust": "wind_gust",
+    "Wind Bearing": "wind_bearing_deg",
+    "Precipitation Intensity": "precip_intensity",
+    "Precipitation Probability": "precip_probability",
+    "Precipitation Type": "precip_type",
+    "Sunrise Time": "sunrise_epoch",
+    "Sunset Time": "sunset_epoch",
+    "Moon Phase": "moon_phase",
+    "Cloud Cover": "cloud_cover",
+    "Weather Visibility": "visibility_m",
+    "UV Index": "uv_index",
+    "Weather Ozone": "ozone",
+}
+
+
+def _opt_float(v) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(f) else f
+
+
+def _opt_str(v) -> str | None:
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def _weather_json(row) -> str | None:
+    out = {}
+    for col, key in _WEATHER_COLS.items():
+        v = _opt_float(row.get(col))
+        if v is not None:
+            out[key] = v
+    return json.dumps(out) if out else None
 
 
 def _find_track_file(export_dir: Path, rel_path: str) -> Path | None:
@@ -57,6 +120,8 @@ def _parse_csv(export_dir: Path) -> pd.DataFrame:
             rename[col] = "moving_time_s"
         elif low == "filename":
             rename[col] = "filename"
+        elif low in _ENRICH_RENAMES and _ENRICH_RENAMES[low] not in rename.values():
+            rename[col] = _ENRICH_RENAMES[low]
     df = df.rename(columns=rename)
     return df
 
@@ -117,6 +182,13 @@ def ingest(export_dir: Path, *, progress_cb=None) -> tuple[int, int]:
                     strava_url=f"https://www.strava.com/activities/{activity_id}",
                     source="bulk",
                     track_wkt=wkt,
+                    gear=_opt_str(row.get("gear")),
+                    elevation_gain_m=_opt_float(row.get("elevation_gain_m")),
+                    avg_hr=_opt_float(row.get("avg_hr")),
+                    max_hr=_opt_float(row.get("max_hr")),
+                    relative_effort=_opt_float(row.get("relative_effort")),
+                    description=_opt_str(row.get("description")),
+                    weather_json=_weather_json(row),
                 )
                 inserted += 1
             except Exception:

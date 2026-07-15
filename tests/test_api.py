@@ -42,7 +42,8 @@ def app_client(tmp_path: Path, monkeypatch):
     yield TestClient(api_mod.app), db_mod, api_mod
 
 
-def _seed(conn, *, id: int, type_: str = "Run", coords=None, start="2025-01-01T08:00:00"):
+def _seed(conn, *, id: int, type_: str = "Run", coords=None,
+          start="2025-01-01T08:00:00", **enrich):
     if coords is None:
         # A zig-zag — straight-line simplification would collapse a perfectly
         # linear track to just endpoints, which hides the dedupe behaviour we
@@ -62,6 +63,7 @@ def _seed(conn, *, id: int, type_: str = "Run", coords=None, start="2025-01-01T0
         strava_url=f"https://www.strava.com/activities/{id}",
         source="test",
         track_wkt=f"LINESTRING({wkt_pts})",
+        **enrich,
     )
 
 
@@ -704,3 +706,228 @@ def test_invalidate_caches_picks_up_new_tracks(app_client):
     # /index.json invalidates alongside.
     idx = client.get("/index.json").json()
     assert {a["id"] for a in idx["activities"]} == {1, 2}
+
+
+# ---- Enrichment columns (gear / elevation / HR / weather) ------------------
+
+
+def test_schema_migrates_existing_db(app_client, tmp_path):
+    """A DB created before the enrichment columns gains them on connect."""
+    _, db_mod, _ = app_client
+    old = tmp_path / "old.duckdb"
+    import duckdb as _duck
+    c = _duck.connect(str(old))
+    c.execute("""
+        CREATE TABLE activities (
+            id BIGINT PRIMARY KEY, start_time TIMESTAMP, name VARCHAR,
+            distance_m DOUBLE, moving_time_s INTEGER, type VARCHAR,
+            strava_url VARCHAR, source VARCHAR)
+    """)
+    c.close()
+    conn = db_mod.connect(old)
+    cols = {r[0] for r in conn.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'activities'").fetchall()}
+    conn.close()
+    assert {"gear", "elevation_gain_m", "avg_hr", "max_hr",
+            "relative_effort", "description", "weather"} <= cols
+
+
+def test_upsert_enrichment_roundtrip_and_null_preservation(app_client):
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, gear="Brooks Ghost 15", elevation_gain_m=320.0,
+          avg_hr=142.0, max_hr=171.0, relative_effort=55.0,
+          description="⛰️ Crow Wells Hill", weather_json='{"temperature_c": 5.0}')
+    row = conn.execute(
+        "SELECT gear, elevation_gain_m, avg_hr, max_hr, relative_effort, "
+        "description, weather FROM activities WHERE id = 1").fetchone()
+    assert row == ("Brooks Ghost 15", 320.0, 142.0, 171.0, 55.0,
+                   "⛰️ Crow Wells Hill", '{"temperature_c": 5.0}')
+
+    # Re-upsert the same id with no enrichment (as the API sync would for
+    # description/weather) — existing values must survive.
+    _seed(conn, id=1)
+    row = conn.execute("SELECT gear, description, weather FROM activities WHERE id = 1").fetchone()
+    assert row == ("Brooks Ghost 15", "⛰️ Crow Wells Hill", '{"temperature_c": 5.0}')
+
+    # A non-null value still wins over the stored one.
+    _seed(conn, id=1, gear="Brooks Ghost 16")
+    assert conn.execute("SELECT gear FROM activities WHERE id = 1").fetchone()[0] == "Brooks Ghost 16"
+
+
+# ---- Bulk-export enrichment parsing ----------------------------------------
+
+
+def _bulk_df(csv_text: str):
+    from run_map import ingest_bulk
+    import tempfile, pathlib
+    with tempfile.TemporaryDirectory() as d:
+        p = pathlib.Path(d) / "activities.csv"
+        p.write_text(csv_text)
+        return ingest_bulk._parse_csv(pathlib.Path(d))
+
+
+def test_parse_csv_normalises_enrichment_columns():
+    # Duplicate 'Max Heart Rate' / 'Relative Effort' headers mimic the real
+    # export; the first occurrence must win.
+    df = _bulk_df(
+        "Activity ID,Activity Date,Activity Name,Activity Type,"
+        "Max Heart Rate,Relative Effort,Activity Gear,Activity Description,"
+        "Filename,Distance,Moving Time,Elevation Gain,Average Heart Rate,"
+        "Max Heart Rate,Relative Effort\n"
+        '1,"Jan 1, 2025, 8:00:00 AM",Morning Run,Run,'
+        "171.0,55.0,Brooks Ghost 15,Nice run,"
+        "activities/1.gpx,5.0,1800,320.0,142.0,"
+        "999.0,888.0\n"
+    )
+    row = df.iloc[0]
+    assert row["gear"] == "Brooks Ghost 15"
+    assert row["description"] == "Nice run"
+    assert float(row["elevation_gain_m"]) == 320.0
+    assert float(row["avg_hr"]) == 142.0
+    assert float(row["max_hr"]) == 171.0
+    assert float(row["relative_effort"]) == 55.0
+
+
+def test_weather_json_builds_from_row_and_skips_empty():
+    import pandas as pd
+    import json as _json
+    from run_map import ingest_bulk
+    row = pd.Series({
+        "Weather Temperature": 5.0,
+        "Humidity": 0.84,
+        "Wind Speed": 3.1,
+        "Weather Condition": 3.0,
+        "UV Index": float("nan"),   # empty cell -> omitted
+    })
+    w = _json.loads(ingest_bulk._weather_json(row))
+    assert w == {"temperature_c": 5.0, "humidity": 0.84,
+                 "wind_speed": 3.1, "condition": 3.0}
+    # All-empty weather -> None, not '{}'
+    assert ingest_bulk._weather_json(pd.Series({"Humidity": float("nan")})) is None
+
+
+def test_opt_helpers_handle_nan():
+    from run_map import ingest_bulk
+    assert ingest_bulk._opt_float(float("nan")) is None
+    assert ingest_bulk._opt_float("320.0") == 320.0
+    assert ingest_bulk._opt_float(None) is None
+    assert ingest_bulk._opt_str(float("nan")) is None
+    assert ingest_bulk._opt_str("  Brooks  ") == "Brooks"
+    assert ingest_bulk._opt_str("") is None
+
+
+# ---- Strava API sync enrichment --------------------------------------------
+
+
+def test_gear_names_from_athlete_payload():
+    from run_map import ingest_strava
+    athlete = {
+        "shoes": [
+            {"id": "g123", "name": "Brooks Ghost 15"},
+            {"id": "g456", "name": "  Inov-8 TrailFly Ultra G300 "},
+            {"id": "g789", "name": ""},          # unnamed -> skipped
+            {"name": "no id"},                    # no id -> skipped
+        ],
+        "bikes": [{"id": "b1", "name": "Gravel bike"}],
+    }
+    assert ingest_strava._gear_names(athlete) == {
+        "g123": "Brooks Ghost 15",
+        "g456": "Inov-8 TrailFly Ultra G300",
+        "b1": "Gravel bike",
+    }
+    assert ingest_strava._gear_names({}) == {}
+
+
+def test_enrichment_from_summary():
+    from run_map import ingest_strava
+    a = {
+        "gear_id": "g123",
+        "total_elevation_gain": 320.0,
+        "average_heartrate": 142.2,
+        "max_heartrate": 171,
+        "suffer_score": 55,
+    }
+    got = ingest_strava._enrichment_from_summary(a, {"g123": "Brooks Ghost 15"})
+    assert got == {
+        "gear": "Brooks Ghost 15",
+        "elevation_gain_m": 320.0,
+        "avg_hr": 142.2,
+        "max_hr": 171.0,
+        "relative_effort": 55.0,
+    }
+    # Unknown gear id / missing fields -> Nones, never KeyError.
+    got = ingest_strava._enrichment_from_summary({"gear_id": None}, {})
+    assert got == {"gear": None, "elevation_gain_m": None, "avg_hr": None,
+                   "max_hr": None, "relative_effort": None}
+
+
+# ---- gear filter + enriched payloads ----------------------------------------
+
+
+def test_index_json_carries_gear(app_client):
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, gear="Brooks Ghost 15")
+    _seed(conn, id=2)  # no gear
+    acts = {a["id"]: a for a in client.get("/index.json").json()["activities"]}
+    assert acts[1]["gear"] == "Brooks Ghost 15"
+    assert acts[2]["gear"] is None
+
+
+def test_gear_filter_on_index(app_client):
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, gear="Brooks Ghost 15")
+    _seed(conn, id=2, gear="Merrell Moab 3 GTX")
+    _seed(conn, id=3)  # no gear
+
+    ids = lambda r: sorted(a["id"] for a in r.json()["activities"])
+    assert ids(client.get("/index.json?gear=Brooks%20Ghost%2015")) == [1]
+    # Repeatable param ORs together.
+    assert ids(client.get(
+        "/index.json?gear=Brooks%20Ghost%2015&gear=Merrell%20Moab%203%20GTX")) == [1, 2]
+    # Empty value means "no shoe".
+    assert ids(client.get("/index.json?gear=")) == [3]
+    assert ids(client.get("/index.json?gear=&gear=Brooks%20Ghost%2015")) == [1, 3]
+
+
+def test_gear_filter_distinct_cache_entries(app_client):
+    """Two different gear filters must not collide on one cache blob."""
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, gear="A")
+    _seed(conn, id=2, gear="B")
+    a = client.get("/index.json?gear=A").json()["activities"]
+    b = client.get("/index.json?gear=B").json()["activities"]
+    assert [x["id"] for x in a] == [1]
+    assert [x["id"] for x in b] == [2]
+
+
+def test_match_carries_enrichment(app_client):
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, gear="Brooks Ghost 15", elevation_gain_m=320.0,
+          avg_hr=142.0, max_hr=171.0, relative_effort=55.0,
+          description="⛰️ Crow Wells Hill")
+    r = client.get("/match", params={"lat": 53.50, "lon": -1.50, "r": 200})
+    assert r.status_code == 200
+    m = r.json()[0]
+    assert m["gear"] == "Brooks Ghost 15"
+    assert m["elevation_gain_m"] == 320.0
+    assert m["avg_hr"] == 142.0
+    assert m["max_hr"] == 171.0
+    assert m["relative_effort"] == 55.0
+    assert m["description"] == "⛰️ Crow Wells Hill"
+    assert isinstance(m["geometry"], list) and len(m["geometry"]) > 0
+
+
+def test_gear_filter_on_match(app_client):
+    client, db_mod, _ = app_client
+    conn = db_mod.connect()
+    _seed(conn, id=1, gear="Brooks Ghost 15")
+    _seed(conn, id=2, gear="Merrell Moab 3 GTX")
+    r = client.get("/match", params={"lat": 53.50, "lon": -1.50, "r": 200,
+                                     "gear": "Brooks Ghost 15"})
+    assert [m["id"] for m in r.json()] == [1]
