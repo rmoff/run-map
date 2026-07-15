@@ -2174,15 +2174,19 @@ function _activityDistancesKm() {
 }
 
 // Shoes facet: checkbox per distinct gear value, counts cascaded by the
-// *other* draft facets (date + type) — a facet never narrows itself.
+// *other* applied facets (date + type + applied distance) — a facet never
+// narrows itself.
 function _renderGearList() {
   const host = document.getElementById('filter-gear-list');
   if (!host) return;
   const f = { ..._draftOtherFilters(), gear: null };
   const src = _allActivities.length ? _allActivities : Array.from(indexById.values());
+  const lo = activeFilters.min_km, hi = activeFilters.max_km;
   const counts = new Map();
   for (const a of src) {
     if (!_activityMatchesOtherFilters(a, f)) continue;
+    if (lo != null && a.distance_m < lo * 1000) continue;
+    if (hi != null && a.distance_m >= hi * 1000) continue;
     const g = a.gear || '';
     counts.set(g, (counts.get(g) || 0) + 1);
   }
@@ -2833,6 +2837,7 @@ function renderShoeChart() {
     kmMax = Math.max(kmMax, s.total);
   }
   if (t1 <= t0) t1 = t0 + 86400e3;
+  if (!kmMax) kmMax = 1;
   const x = t => m.left + ((t - t0) / (t1 - t0)) * (W - m.left - m.right);
   const y = km => H - m.bottom - (km / kmMax) * (H - m.top - m.bottom);
 
@@ -2872,12 +2877,14 @@ function renderShoeChart() {
     path.setAttribute('fill', 'none');
     path.setAttribute('stroke', s.color);
     path.setAttribute('stroke-width', '2');
+    path.setAttribute('stroke-linecap', 'round');
     path.dataset.shoe = s.name;
     const hit = document.createElementNS(_svgNS, 'path');
     hit.setAttribute('d', d);
     hit.setAttribute('fill', 'none');
     hit.setAttribute('stroke', 'rgba(0,0,0,0)');
     hit.setAttribute('stroke-width', '12');
+    hit.setAttribute('stroke-linecap', 'round');
     hit.dataset.shoe = s.name;
     hit.addEventListener('mouseenter', () => {
       _shoeFocus(s.name);

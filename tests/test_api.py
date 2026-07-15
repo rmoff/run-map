@@ -760,8 +760,6 @@ def test_upsert_enrichment_roundtrip_and_null_preservation(app_client):
 
 
 def _bulk_df(csv_text: str):
-    import io
-    import pandas as pd  # noqa: F401  (ingest_bulk re-exports nothing; parse via module)
     from run_map import ingest_bulk
     import tempfile, pathlib
     with tempfile.TemporaryDirectory() as d:
@@ -781,7 +779,7 @@ def test_parse_csv_normalises_enrichment_columns():
         '1,"Jan 1, 2025, 8:00:00 AM",Morning Run,Run,'
         "171.0,55.0,Brooks Ghost 15,Nice run,"
         "activities/1.gpx,5.0,1800,320.0,142.0,"
-        "171.0,55.0\n"
+        "999.0,888.0\n"
     )
     row = df.iloc[0]
     assert row["gear"] == "Brooks Ghost 15"
